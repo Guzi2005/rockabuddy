@@ -16,7 +16,8 @@
       "type": "zcode",
       "unit": "万tok",
       "daily_budget_tokens": 30000000,
-      "note": "统计本机 ZCode 今日实际消耗; daily_budget_tokens 留空则只显示消耗量",
+      "launch": "C:\\path\\to\\ZCode.exe",
+      "note": "launch 可选: 看板点图标时没找到窗口就启动这个程序",
       "processes": ["ZCode.exe"]
     },
     {

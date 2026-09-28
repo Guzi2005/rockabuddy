@@ -3,6 +3,7 @@ import ctypes
 import math
 import os
 import random
+import statistics
 import time
 import paths
 from animation import SpritePlayer, SUNFLOWER_HOLD_FRAME, SUNFLOWER_PALM, SUNFLOWER_LIFT_SECONDS
@@ -15,6 +16,8 @@ from PySide6.QtWidgets import (QApplication, QMenu, QWidget,
 
 ASSET = paths.resource_path("assets", "companion.png")
 DESK_FIT = 0.89  # 办公桌帧构图偏大, 按头发宽度对齐站立体型(133px/150px)
+SPRITE_PAD_X = 24  # 窗口左右透明安全区: 音符/星火外飘不被隐形边缘裁掉
+SHAKE_WIN, SHAKE_AMP, SHAKE_NEED = 1.5, 35, 3   # 摇晕: 1.5s 内 3 次满幅反向
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "Rockabuddy"
 
@@ -160,10 +163,12 @@ class PetWidget(QWidget):
         self._trophy_geom = None
         self._watcher = None
         self._watch_apps = self.settings.value("watch_apps", True, type=bool)
-        # 摇晃眩晕: 拖拽中快速往复积累眩晕值, 松手超标就晕
+        # 摇晃眩晕: 方向反转且满幅才算一次有效晃动, 1.5s 内攒满 3 次就晕
         self._shake = 0.0
-        self._last_drag = None      # (x, 时刻)
-        self._last_vx = 0.0
+        self._shake_marks = []      # 有效晃动的时刻
+        self._shake_dir = 0         # 当前计向(0=未定)
+        self._shake_ref_x = 0       # 上一个转向点
+        self._last_drag = None      # 上次移动的 x
         self._dizzy_until = -10.0
         # 听音乐模式: 旧版 rock 布尔设置迁移为模式名
         legacy_rock = self.settings.value("rock", True, type=bool)
@@ -182,6 +187,14 @@ class PetWidget(QWidget):
         self._opera_anchor = 0.0
         self._opera_side = 1
         self._opera_note_at = -1.0    # 当前乐句开始时刻(>=0 表示嘴边正蓄着音符)
+        # 训练模式: 10 秒敲击采集(八字双铅笔), 结束按敲击风格适配模式
+        self._train_until = -1.0
+        self._train_taps = []         # [开始时刻, 时长或None, 虚拟键]
+        self._train_held = {}         # 仍按着的键: vk -> (按下时刻, 笔序号)
+        self._pen_press = [0.0, 0.0]  # 每支笔的按压量 0-1(长按伏地)
+        self._pen_kick = [0.0, 0.0]   # 敲击冲量(短促一敲)
+        self._pen_side = 0
+        self._train_demo_until = -1.0
         self._notes = []           # 音符粒子: [birth, x0, y0, drift, glyph, size]
         self._last_note = -10.0
         self._listener = None
@@ -392,7 +405,7 @@ class PetWidget(QWidget):
             side = self._beat_dir
             self._notes.append([
                 now,
-                self.width() / 2 + side * self.width() * .30,   # 出生在她耳侧
+                self.width() / 2 + side * (self.width() - 16 - 2 * SPRITE_PAD_X) * .30,   # 出生在她耳侧
                 min(40 + (self._full_h - 44) * .28, self.height() * .55),  # 头部高度(办公桌模式压低)
                 side * (4 + 5 * strength),                      # 向外漂移
                 "♫" if strength > .55 else "♪",
@@ -425,7 +438,7 @@ class PetWidget(QWidget):
         if len(self._notes) < 8:
             self._notes.append([
                 self._now,
-                self.width() / 2 + self._opera_side * self.width() * .10,
+                self.width() / 2 + self._opera_side * (self.width() - 16 - 2 * SPRITE_PAD_X) * .10,
                 min(40 + (self._full_h - 44) * .26, self.height() * .42),
                 self._opera_side * (4 + 4 * min(1.0, dur)),
                 "♫" if dur >= 1.0 else "♪",
@@ -464,20 +477,29 @@ class PetWidget(QWidget):
         super().closeEvent(event)
 
     def set_size(self, height):
+        """height 是期望的精灵身高。窗宽按当前角色首帧内容的宽高比算,
+        向日葵这类方正形象不会再被 0.8 的固定窗宽压扁成小个子;
+        左右各留 SPRITE_PAD_X 透明安全区, 外飘元素不被窗口边缘裁掉。"""
         height = max(180, min(320, height))
         self._full_h = height + 56
-        sprite_h = self._full_h - 44  # 排版区: 顶部留 40 给气泡, 脚底贴窗口底
+        sprite_h = self._full_h - 44   # 排版区: 顶部留 40 给气泡, 脚底贴窗口底
+        aspect = max(0.4, getattr(self.player, "sprite_aspect", 0.67))
+        width = int(height * aspect) + 28 + 2 * SPRITE_PAD_X
         if self._desk and len(self.player.frames) > 22:
-            # 办公桌帧(笔记本烤进图里): 整帧露出, 高宽比按实际裁切后的帧算,
+            # 办公桌帧(笔记本烤进图里): 整帧露出,
             # 乘 DESK_FIT 让她的体型和站立模式一致
             fr = self.player.frames[20]
             ratio = fr.height() / fr.width()
-            visible = 40 + int((int(height * .8) - 16) * DESK_FIT * ratio) + 2
+            visible = 40 + int((width - 16 - 2 * SPRITE_PAD_X) * DESK_FIT * ratio) + 2
         elif self._desk:
             visible = 40 + int(sprite_h * .52)
         else:
             visible = self._full_h
-        self.setFixedSize(int(height * .8), visible)
+        # 保持精灵中心与脚底屏幕位置不动
+        old_bottom = self.y() + self.height()
+        old_cx = self.x() + self.width() / 2
+        self.setFixedSize(width, visible)
+        self.move(round(old_cx - width / 2), old_bottom - visible)
         self.settings.setValue("height", height)
         self.update()
 
@@ -523,13 +545,20 @@ class PetWidget(QWidget):
             delta = min(.05, self._now - self._last_tick)
             self._last_tick = self._now
             self._phase = self._now * 2
-            self._shake *= math.exp(-1.6 * delta)   # 眩晕值随时间消退
+            self._shake_marks = [t for t in self._shake_marks
+                                 if time.monotonic() - t <= SHAKE_WIN]
+            self._shake = float(len(self._shake_marks))
             self._tilt += (self._target_tilt - self._tilt) * (1 - math.exp(-14 * delta))
             if self._now < self._dizzy_until and self._drag_pos is None:
                 # 眩晕余韵: 脚底锚点不变, 上身快速摆动并衰减
                 decay = (self._dizzy_until - self._now) / 2.8
                 self._target_tilt = math.sin(self._now * 9.5) * 7 * decay
             self._track_cursor(delta)
+            if self._now < self._train_until:
+                self._scan_training()
+                self._tick_pens(delta)
+            elif self._train_until > 0:
+                self._finish_training()
             if self._animate and self._drag_pos is None and self._now >= self._dizzy_until:
                 if self._music_mode == "opera":
                     # 美声跟唱: 以乐句(约两拍)为单位的正弦缓动, 幅度随人声响度呼吸
@@ -540,10 +569,14 @@ class PetWidget(QWidget):
                 elif self._music_mode == "rock" and self.player.rocking:
                     # 甩头冲量拍间自然回落, 不然一直歪着
                     self._target_tilt *= math.exp(-1.4 * delta)
+            if self._train_demo_until > 0 and self._now >= self._train_demo_until:
+                self._train_demo_until = -1.0
+                if not self._music_on:
+                    self.player.rocking = False
             self._idle_quirks()
             if self._doze_until > self._now and self._animate:
                 self._doze_zzz()
-            if self._desk and self._animate:
+            if self._desk and self._animate and self._now >= self._train_until:
                 self._scan_typing()
             self._adapt_fps()
             self.update()
@@ -598,7 +631,7 @@ class PetWidget(QWidget):
             self._next_z = self._now + 1.1 + random.random() * .5
             self._notes.append([
                 self._now,
-                self.width() * .60 + random.random() * 8,
+                self.width() / 2 + (self.width() - 16 - 2 * SPRITE_PAD_X) * .12 + random.random() * 8,
                 min(40 + (self._full_h - 44) * .26, self.height() * .42),
                 5 + random.random() * 4,          # 向右缓漂
                 "Z",
@@ -610,6 +643,93 @@ class PetWidget(QWidget):
             self._doze_until = -10.0
             self.player.dozing = False
             self.react("pet", text)
+
+    def start_training(self):
+        """10 秒节奏采集: 八字双铅笔跟着鼠标/键盘敲击起落, 长按伏地。"""
+        self._train_until = self._now + 10.0
+        self._train_taps = []
+        self._train_held = {}
+        self._pen_press = [0.0, 0.0]
+        self._pen_kick = [0.0, 0.0]
+        self._pen_side = 0
+        self._last_interaction = self._now
+        self._wake("来,跟着我敲!")
+        self.react("pet", "鼠标键盘都行, 敲 10 秒!")
+
+    def _scan_training(self):
+        """任意键/鼠标按下沿 = 一敲(双笔交替); 按着的键让笔保持伏地。"""
+        get = ctypes.windll.user32.GetAsyncKeyState
+        now = self._now
+        for vk in range(1, 255):
+            state = get(vk)
+            if state & 0x0001 and vk not in self._train_held:
+                self._train_held[vk] = (now, self._pen_side)
+                self._train_taps.append([now, None, vk])
+                self._pen_side = 1 - self._pen_side
+                self._pen_kick[self._pen_side] = 1.0
+                self._last_interaction = now
+            elif vk in self._train_held and not (state & 0x8000):
+                start, _side = self._train_held.pop(vk)
+                for tap in reversed(self._train_taps):
+                    if tap[2] == vk and tap[1] is None:
+                        tap[1] = max(0.0, now - start)
+                        break
+
+    def _tick_pens(self, delta):
+        get = ctypes.windll.user32.GetAsyncKeyState
+        held_sides = set()
+        for vk, (_start, side) in list(self._train_held.items()):
+            if get(vk) & 0x8000:
+                held_sides.add(side)
+        ease = 1 - math.exp(-16 * delta)
+        for i in (0, 1):
+            target = 1.0 if i in held_sides else 0.0
+            self._pen_press[i] += (target - self._pen_press[i]) * ease
+            self._pen_kick[i] *= math.exp(-9 * delta)
+
+    def _finish_training(self):
+        end = self._train_until
+        taps = self._train_taps
+        self._train_until = -1.0
+        self._train_taps = []
+        self._train_held = {}
+        for t in taps:
+            if t[1] is None:                    # 到点还按着的, 按 10s 线收尾
+                t[1] = max(0.0, end - t[0])
+        starts = [t[0] for t in taps]
+        if len(starts) < 6:
+            self.react("pet", "敲得太少啦, 再来一次?")
+            return
+        iois = [b - a for a, b in zip(starts, starts[1:]) if 0.08 <= b - a <= 3.0]
+        if len(iois) < 5:
+            self.react("pet", "节奏没抓准, 再来一次?")
+            return
+        period = statistics.median(iois)
+        while period < 0.28:                    # 半速纠正, 折进可唱的区间
+            period *= 2
+        while period > 1.30:
+            period /= 2
+        mean = statistics.fmean(iois)
+        cv = statistics.pstdev(iois) / mean if mean > 0 else 1.0
+        holds = sum(1 for t in taps if t[1] >= 0.30) / len(taps)
+        # 风格适配: 长按多→美声长音; 稳定均匀→节拍器卡点; 快慢参差→甩头
+        if holds >= 0.30:
+            mode = "opera"
+        elif cv <= 0.22:
+            mode = "metronome"
+        else:
+            mode = "rock"
+        self.set_music_mode(mode)
+        self._beat_period = period
+        self.player.rock_period = period
+        if mode in ("rock", "metronome") and not self._music_on:
+            # 学以致用: 按学到的节奏点头三下
+            self.player.rocking = True
+            self.player.rock_anchor = self._now - period / 2
+            self.player.rock_cap = 3
+            self._train_demo_until = self._now + period * 3
+        bpm = round(60.0 / period)
+        self.react("pet", "学会了!%s · %d BPM" % (MUSIC_MENU[mode].split(" ·")[0], bpm))
 
     def _adapt_fps(self):
         """静息降帧: 没有任何动画/交互时降到 ~8fps, 省下透明窗口的重绘开销。"""
@@ -650,6 +770,10 @@ class PetWidget(QWidget):
         self._reaction_until = self._now + 2.2
         self._bubble_pop = self._now
 
+    def _greet_clip(self):
+        """打招呼: 一半概率迎视, 一半概率招手(图集 17 号招手帧)。"""
+        return "wave" if random.random() < .5 else "greet"
+
     def enterEvent(self, event):
         self._hover = True
         now = time.monotonic() - self._epoch
@@ -659,7 +783,7 @@ class PetWidget(QWidget):
         if self.player.dozing:
             self._wake()
         else:
-            self.react("greet", self.revive_text)
+            self.react(self._greet_clip(), self.revive_text)
         self.update()
 
     def leaveEvent(self, event):
@@ -685,8 +809,8 @@ class PetWidget(QWidget):
     @staticmethod
     def _orbit_text(data):
         """光环数字: 有重置窗口的给复活时刻(超出今明两天带日期), 其余给剩余比例/数量。
-        返回 (文字, 是否已耗尽)。"""
-        if not data.get("ok") or data.get("stale"):
+        返回 (文字, 是否已耗尽); 没有可用数据的返回 None(由调用方灰显占位)。"""
+        if not data.get("ok"):
             return None
         wins = [w for w in (data.get("windows") or [])
                 if w.get("resets_at") and w["resets_at"] > time.time()]
@@ -716,8 +840,10 @@ class PetWidget(QWidget):
         for cfg in configs:
             data = results.get(cfg["id"], {})
             entry = self._orbit_text(data)
-            if entry is not None:
-                orbit.append((cfg["id"], entry[0], entry[1]))
+            if entry is None:
+                # 同步失败/未连接/没数据的也进光环, 半透明灰色占位
+                entry = ("--", True)
+            orbit.append((cfg["id"], entry[0], entry[1]))
             if cfg.get("type") == "manual":
                 continue
             if data.get("ok") and not data.get("stale") and data.get("total", 0) and data.get("remaining") is not None:
@@ -727,7 +853,7 @@ class PetWidget(QWidget):
                 if ts and ts > time.time() and window.get("remaining_percent", 100) < 100:
                     if soonest is None or ts < soonest:
                         soonest, soonest_name = ts, cfg["name"]
-        self.orbit = orbit[:6]
+        self.orbit = orbit[:8]
         self.pct = min(ratios)[0] if ratios else None
         self.alert = self.pct is not None and self.pct < 30
         lowest = min(ratios) if ratios else None
@@ -794,7 +920,8 @@ class PetWidget(QWidget):
         desk_baked = self._desk and len(self.player.frames) > 22
         rect_h = (self.height() + 4 if desk_baked else self._full_h) - 44
         # 叠叠乐把窗口向上加高过时, 排版区整体下移, 她始终贴窗口底(屏幕位置不动)
-        rect = QRectF(8, 40 + self._trophy_pad, self.width() - 16, rect_h)
+        rect = QRectF(8 + SPRITE_PAD_X, 40 + self._trophy_pad,
+                      self.width() - 16 - 2 * SPRITE_PAD_X, rect_h)
         halo_active = self._hover and self.orbit
         halo = []
         if halo_active:
@@ -866,6 +993,8 @@ class PetWidget(QWidget):
             p.drawText(rect, Qt.AlignCenter, "Rockabuddy\n桌宠素材未找到")
         if self._desk and not desk_baked:
             self._draw_laptop(p, self._typing())
+        if self._now < self._train_until:
+            self._draw_pens(p, rect)
         if self._notes:
             # 音符/Zzz 粒子: 从耳侧(或头顶)升起, 漂移淡出; 强拍金色 ♫, 弱拍青色 ♪, 打盹灰绿 Z;
             # 白描边垫底, 在深色衣服上也能看清
@@ -902,7 +1031,7 @@ class PetWidget(QWidget):
             size = min(46.0, 26.0 + dur * 10.0)
             pulse = 1.0 + .08 * math.sin(self._now * 9) \
                 * min(1.0, self._voice_level * 5 + .3)
-            hx = self.width() / 2 + self._opera_side * self.width() * .10
+            hx = self.width() / 2 + self._opera_side * (self.width() - 16 - 2 * SPRITE_PAD_X) * .10
             hy = min(40 + (self._full_h - 44) * .26, self.height() * .42) + 14 \
                 + 1.5 * math.sin(self._now * 3)
             area = QRectF(hx - size, hy - size, size * 2, size * 2)
@@ -954,8 +1083,10 @@ class PetWidget(QWidget):
                         p.setPen(Qt.NoPen)
                         for ang in (-125, -90, -55, -20, -155):
                             d = 6 + 26 * st
-                            sx = px + d * math.cos(math.radians(ang))
-                            sy = py + d * math.sin(math.radians(ang)) * .8
+                            sx = min(max(4.0, px + d * math.cos(math.radians(ang))),
+                                     self.width() - 4.0)
+                            sy = min(max(4.0, py + d * math.sin(math.radians(ang)) * .8),
+                                     self.height() - 4.0)
                             sr = 3.2 * (1 - st) + .6
                             p.setBrush(QColor(255, 214, 90, int(255 * (1 - st))))
                             p.drawEllipse(QPointF(sx, sy), sr, sr)
@@ -1060,6 +1191,41 @@ class PetWidget(QWidget):
             p.setFont(QFont("Microsoft YaHei UI", 7, QFont.Bold))
             p.drawText(box, Qt.AlignCenter, text)
 
+    def _draw_pens(self, p, rect):
+        """训练模式: 八字双铅笔悬在脚前, 跟敲击交替敲下, 长按伏地, 上方倒计时。"""
+        cx, base_y = rect.center().x(), rect.bottom() + 2
+        L = min(92.0, self.width() * .40)
+        pivot_y = base_y - L * math.cos(math.radians(6)) - 2
+        for i, side in enumerate((-1, 1)):
+            press = max(0.0, min(1.0, max(self._pen_press[i], self._pen_kick[i])))
+            ang = math.radians(24 - 18 * press)
+            p.save()
+            p.translate(cx + side * 10, pivot_y)
+            p.rotate(-side * math.degrees(ang))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#e8a0a0"))                        # 橡皮
+            p.drawRoundedRect(QRectF(-3.5, -4, 7, 7), 3, 3)
+            p.setBrush(QColor("#b8c0c4"))                        # 金属箍
+            p.drawRoundedRect(QRectF(-3.5, 2, 7, 5), 1.5, 1.5)
+            p.setBrush(QColor("#e8c06a"))                        # 笔杆
+            p.drawRoundedRect(QRectF(-3.5, 6, 7, L - 16), 2.5, 2.5)
+            tip = QPainterPath()                                 # 笔尖
+            tip.moveTo(-3.5, L - 10)
+            tip.lineTo(3.5, L - 10)
+            tip.lineTo(0, L + 2)
+            tip.closeSubpath()
+            p.setBrush(QColor("#4a4a4a"))
+            p.drawPath(tip)
+            p.restore()
+        remain = max(0.0, (self._train_until - self._now) / 10.0)
+        bw = rect.width() * .55
+        bar_y = pivot_y - L - 10
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#e2e5dc"))
+        p.drawRoundedRect(QRectF(cx - bw / 2, bar_y, bw, 4), 2, 2)
+        p.setBrush(QColor("#5fae9f"))
+        p.drawRoundedRect(QRectF(cx - bw / 2, bar_y, max(2, bw * remain), 4), 2, 2)
+
     def _draw_laptop(self, p, typing):
         """办公桌模式的笔记本道具: 画在精灵之后, 挡住被裁掉的下半身。"""
         w, h = self.width(), self.height()
@@ -1100,9 +1266,11 @@ class PetWidget(QWidget):
             self._press = event.globalPosition().toPoint()
             self._drag_pos = self._press - self.pos()
             self._moved = False
+            self._shake_marks = []
             self._shake = 0.0
+            self._shake_dir = 0
+            self._shake_ref_x = self._press.x()
             self._last_drag = None
-            self._last_vx = 0.0
             self.setCursor(Qt.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
@@ -1111,25 +1279,33 @@ class PetWidget(QWidget):
             if (current - self._press).manhattanLength() >= QApplication.startDragDistance():
                 self._moved = True
             if self._moved:
-                # 摇晃检测: 水平速度够快且方向反转 = 一次有效晃动, 累积眩晕值
-                now = time.monotonic()
-                if self._last_drag is not None:
-                    dt = now - self._last_drag[1]
-                    if dt > 0.005:
-                        vx = (current.x() - self._last_drag[0]) / dt
-                        if (vx * self._last_vx < 0
-                                and abs(vx) > 700 and abs(self._last_vx) > 700):
-                            self._shake += min(2.0, (abs(vx) + abs(self._last_vx)) / 2400)
-                        self._last_vx = vx
-                self._last_drag = (current.x(), now)
+                self._register_shake_move(current.x(), time.monotonic())
                 next_pos = current - self._drag_pos
                 self._target_tilt = max(-9, min(9, (next_pos.x() - self.x()) * .35))
                 self.move(current - self._drag_pos)
 
+    def _register_shake_move(self, x, now):
+        """摇晃检测核心(独立可测): 方向反转且两转向点相距满幅才算一次晃动。
+        不依赖瞬时速度——离散鼠标采样在拐点必然过零, 旧的速度判据永远凑不齐。"""
+        dx = x - self._last_drag if self._last_drag is not None else 0
+        if dx:
+            direction = 1 if dx > 0 else -1
+            if direction != self._shake_dir:
+                if self._shake_dir:
+                    if abs(x - self._shake_ref_x) >= SHAKE_AMP:
+                        self._shake_marks.append(now)
+                    self._shake_ref_x = x
+                else:
+                    self._shake_ref_x = x      # 首次移动: 只定方向与起点
+                self._shake_dir = direction
+        self._last_drag = x
+        self._shake_marks = [t for t in self._shake_marks if now - t <= SHAKE_WIN]
+        self._shake = float(len(self._shake_marks))
+
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self._drag_pos is not None:
             self._last_interaction = self._now
-            dizzy = self._moved and self._shake >= 3.0 and self._animate
+            dizzy = self._moved and len(self._shake_marks) >= SHAKE_NEED and self._animate
             if not self._moved:
                 self.clicked.emit()
             self._drag_pos = None
@@ -1138,7 +1314,7 @@ class PetWidget(QWidget):
             if dizzy:
                 # 晃晕了: 螺旋眼帧随摆动相位左右歪头(sample 的 dizzy 分支) + 气泡
                 now = time.monotonic() - self._epoch
-                self._dizzy_until = now + 2.8
+                self._dizzy_until = now + min(4.0, 2.4 + 0.5 * len(self._shake_marks))
                 self._reaction = "好晕好晕…"
                 self._reaction_until = now + 2.4
                 self._bubble_pop = now
@@ -1215,7 +1391,7 @@ class PetWidget(QWidget):
 
         fun = menu.addMenu("🐾  互动")
         fun.addAction("✋  摸摸头", lambda: self.react("pet", self.revive_text))
-        fun.addAction("👋  打个招呼", lambda: self.react("greet", self.revive_text))
+        fun.addAction("👋  打个招呼", lambda: self.react(self._greet_clip(), self.revive_text))
         fun.addAction("🍱  快端上来罢（启动记录）", self.show_trophy)
         desk = fun.addAction("💻  底栏办公桌模式")
         desk.setCheckable(True)
@@ -1223,6 +1399,9 @@ class PetWidget(QWidget):
         desk.triggered.connect(self.toggle_desk)
 
         music = menu.addMenu("🎵  听音乐模式")
+        train = music.addAction("✏️  训练 10 秒 · 学你的敲击")
+        train.triggered.connect(self.start_training)
+        music.addSeparator()
         music_group = QActionGroup(music)
         music_group.setExclusive(True)
         for mode in MUSIC_MODES:

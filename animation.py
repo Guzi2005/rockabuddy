@@ -10,6 +10,8 @@ CLIPS = {
     "blink": [(0, .04), (1, .05), (2, .10), (3, .05), (0, .07)],
     # 注意到你:  idle -> 前倾察觉 -> 回正过渡 -> 睁大眼 -> 歪头好奇 -> 笑意渐起 -> 眯眼开心 -> 停在悬停帧
     "greet": [(0, .06), (15, .10), (30, .09), (4, .12), (6, .16), (31, .10), (5, .30), (4, .12)],
+    # 招手: 抬手 → 招两下(17 举手 / 8 收半) → 眯眼笑收尾
+    "wave": [(0, .08), (17, .22), (8, .16), (17, .24), (8, .16), (17, .28), (18, .26), (4, .12)],
     "pet": [(4, .08), (18, .10), (5, .42), (4, .14)],
     "land": [(16, .07), (1, .06), (0, .16)],
     # 猫式抖耳: 半压耳过渡 -> 双耳压下 -> 单耳一抖 -> 压回 -> 半压回弹 -> 松开
@@ -45,6 +47,7 @@ class SpritePlayer:
         self.directory = directory
         self.character = "owl"
         self.frames = []
+        self.sprite_aspect = 0.67   # 角色首帧内容宽高比, 供 pet 按身形定窗宽
         self._load_frames()
         self.clip = "idle"
         self.started = 0.0
@@ -98,13 +101,34 @@ class SpritePlayer:
         # 单元格宽高比约 2:3, 按行数自适应(旧 4x2 / 补帧后 4x3)
         rows = max(2, round(atlas.height() / (w * 1.5)))
         h = atlas.height() // rows
+        # 逐帧量内容框, 再取并集统一裁切: 所有帧共享同一地平线与画布尺寸,
+        # 摇摆/展臂/眨眼时精灵比例恒定, 脚底钉死不飘
+        boxes = []
+        cells = []
         for index in range(4 * rows):
             frame = atlas.copy(index % 4 * w, index // 4 * h, w, h)
             bounds = QRegion(QBitmap.fromImage(frame.toImage().createAlphaMask())).boundingRect()
+            cells.append((frame, bounds))
             if not bounds.isEmpty():
-                # 四边都裁到内容边界: 底边=脚/笔记本底座, 帧间不漂移也不悬空
-                frame = frame.copy(bounds)
-            self.frames.append(frame)
+                boxes.append(bounds)
+        if boxes:
+            left = min(b.left() for b in boxes)
+            top = min(b.top() for b in boxes)
+            right = max(b.right() for b in boxes)
+            bottom = max(b.bottom() for b in boxes)
+            for frame, _bounds in cells:
+                self.frames.append(frame.copy(left, top, right - left + 1,
+                                              bottom - top + 1))
+        self._measure_aspect()
+
+    def _measure_aspect(self):
+        """量首帧内容宽高比: 不同角色(奥尔细高/向日葵方正)同档身高观感一致。"""
+        self.sprite_aspect = 0.67
+        if self.frames:
+            img = self.frames[0].toImage()
+            bounds = QRegion(QBitmap.fromImage(img.createAlphaMask())).boundingRect()
+            if not bounds.isEmpty() and bounds.height():
+                self.sprite_aspect = max(0.4, min(1.4, bounds.width() / bounds.height()))
 
     def play(self, clip, now):
         self.clip, self.started = clip, now

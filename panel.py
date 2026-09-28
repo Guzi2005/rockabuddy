@@ -30,6 +30,7 @@ QPushButton#ghost {background:#232f31;color:#cfe0d6;border-radius:8px;padding:5p
 QPushButton#ghost:hover {background:#2f3f41;}
 QPushButton#ghost:disabled {color:#6b7d7a;}
 QLineEdit {background:white;border:1px solid #d4d8c9;border-radius:7px;padding:6px;}
+QFrame#cardLive {background:#ffffff;border:1px solid #e3e7db;border-radius:12px;}
 QScrollArea {background:transparent;border:0;}
 QScrollArea > QWidget > QWidget {background:transparent;}
 QScrollBar:vertical {background:transparent;width:5px;margin:0;}
@@ -290,6 +291,25 @@ class Sparkline(QWidget):
         p.drawEllipse(path.currentPosition(), 2.2, 2.2)
 
 
+class ProviderIcon(QWidget):
+    """可点击的服务图标: 点击把对应应用窗口提到最前(没开就启动)。"""
+
+    clicked = Signal()
+
+    def __init__(self, pid, color, size=22, gray=False, tip="", clickable=True):
+        super().__init__()
+        self.setCursor(Qt.PointingHandCursor if clickable else Qt.ArrowCursor)
+        self.setToolTip(tip)
+        self.setFixedSize(size, size)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(icon_widget(pid, color, size, gray))
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+
+
 def seg_bar(segments, drained=False):
     """三段横条: 剩余 / 今日已耗 / 此前已耗, 宽度按百分比分配, 零段不画。"""
     holder = QWidget()
@@ -398,19 +418,24 @@ class PanelSurface(QFrame):
 
 
 class UsageCard(QFrame):
-    """一排一个服务: 大行值 + 动态行(趋势/速率/倒计时) + 每个额度窗口一条三段横条。"""
+    """一排一个服务: 大行值 + 动态行(趋势/速率/倒计时) + 每个额度窗口一条三段横条。
+    在线的可用服务带白色卡片底置顶强调, 耗尽/失败的保持扁平沉底。"""
     edited = Signal(str, float, object)
     connected = Signal()
+    activate = Signal(str)          # 点了服务图标: 前置窗口/启动应用
 
     def __init__(self, cfg, data, color="#5fae9f", baseline=None, series=None,
-                 parent=None):
+                 emphasized=False, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.cfg, self.data = cfg, data
         self.baseline = baseline   # 今日零点前最后一次同步到的服务剩余%(分不出就 None)
         self.countdowns = []
+        if emphasized:
+            self.setObjectName("cardLive")
         root = QVBoxLayout(self)
-        root.setContentsMargins(4, 5, 4, 3)
+        root.setContentsMargins(8, 6, 8, 5) if emphasized \
+            else root.setContentsMargins(4, 5, 4, 3)
         root.setSpacing(4)
 
         pct = service_pct(data)
@@ -421,7 +446,13 @@ class UsageCard(QFrame):
         # ---- 行 1: 图标 名称 徽章 …… 大号主值 ----
         top = QHBoxLayout()
         top.setSpacing(5)
-        top.addWidget(icon_widget(cfg["id"], color, 22, gray=drained))
+        clickable = bool(cfg.get("processes") or cfg.get("launch"))
+        tip = "点击前置窗口 / 启动" if clickable else ""
+        icon = ProviderIcon(cfg["id"], color, 22, gray=drained, tip=tip,
+                            clickable=clickable)
+        if clickable:
+            icon.clicked.connect(lambda: self.activate.emit(self.cfg["id"]))
+        top.addWidget(icon)
         name = label(cfg.get("name", "?"))
         name.setStyleSheet("font-weight:700;font-size:12px" +
                            (";color:#98a09a" if drained else ""))
@@ -591,6 +622,7 @@ class UsageCard(QFrame):
 class Dashboard(QWidget):
     refresh_requested = Signal()
     manual_edited = Signal(str, float, object)
+    provider_activated = Signal(str)    # 点了某服务的图标, 请求前置/启动
 
     def __init__(self):
         super().__init__()
@@ -814,13 +846,26 @@ class Dashboard(QWidget):
         # 今日零点: 用于把消耗拆成「今日/此前」两段(取零点前最后一次同步的剩余%)
         midnight = time.mktime(time.strptime(
             time.strftime("%Y-%m-%d") + " 00:00:00", "%Y-%m-%d %H:%M:%S"))
-        for index, cfg in enumerate(self.cfg.get("providers", [])):
+        providers = list(self.cfg.get("providers", []))
+
+        def usable(cfg):
+            """在线且未耗尽: 卡片强调置顶; 耗尽/失败/没数据的扁平沉底。"""
+            d = self.results.get(cfg["id"], {})
+            if not d.get("ok") or d.get("stale"):
+                return False
+            p = service_pct(d)
+            return p is None or p > 0.5
+
+        providers.sort(key=usable, reverse=True)   # 稳定排序: 组内保持配置顺序
+        for index, cfg in enumerate(providers):
             card = UsageCard(cfg, self.results.get(cfg["id"], {}),
                              PALETTE[index % len(PALETTE)],
                              baseline=self._day_baseline(cfg["id"], midnight),
-                             series=provider_series(self.history, cfg["id"]))
+                             series=provider_series(self.history, cfg["id"]),
+                             emphasized=usable(cfg))
             card.edited.connect(self.manual_edited)
             card.connected.connect(self.refresh_requested)
+            card.activate.connect(self.provider_activated)
             self.items.addWidget(card)
             self.cards.append(card)
 

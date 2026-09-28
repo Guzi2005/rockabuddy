@@ -1,8 +1,11 @@
 """Offline checks for companion status, interactions and input validation."""
+import os
+import tempfile
+import time
 import unittest
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtTest import QTest
-from app import QApplication, Dashboard, ManualEditDialog, PetWidget
+from app import QApplication, Dashboard, ManualEditDialog, PetWidget, ASSET
 import providers
 
 qt = QApplication.instance() or QApplication([])
@@ -86,6 +89,102 @@ class CompanionTests(unittest.TestCase):
                     del os.environ["LOCALAPPDATA"]
                 else:
                     os.environ["LOCALAPPDATA"] = old
+
+
+class ShakeTests(unittest.TestCase):
+    def _shake_series(self, xs, dt=0.06):
+        pet = PetWidget()
+        t = 100.0
+        for x in xs:
+            t += dt
+            pet._register_shake_move(x, t)
+        marks = len(pet._shake_marks)
+        pet.close()
+        return marks
+
+    def test_vigorous_shake_makes_dizzy(self):
+        # 快速大幅左右摇晃: 4 个满幅反向 → 超过 3 次阈值
+        marks = self._shake_series([0, 45, 5, 50, 5, 50, 5, 50])
+        self.assertGreaterEqual(marks, 3)
+
+    def test_small_wiggle_and_drag_do_not(self):
+        # 小幅蠕动(<35px)不算晃动
+        self.assertEqual(self._shake_series([0, 20, 0, 20, 0, 20, 0]), 0)
+        # 单方向拖拽也不算
+        self.assertEqual(self._shake_series([0, 60, 150, 250, 350]), 0)
+
+    def test_marks_expire_over_time(self):
+        pet = PetWidget()
+        self.addCleanup(pet.close)
+        t0 = time.monotonic() - 5.0             # 5 秒前的历史晃动, 早已出窗
+        pet._shake_marks = [t0, t0 + 0.3, t0 + 0.6]
+        pet._shake_dir = -1
+        pet._shake_ref_x = 0
+        pet._last_drag = 0
+        pet._register_shake_move(-50, time.monotonic())
+        self.assertEqual(len(pet._shake_marks), 0)
+
+
+class SpriteCanvasTests(unittest.TestCase):
+    def test_all_frames_share_one_ground_canvas(self):
+        from animation import SpritePlayer
+        player = SpritePlayer(os.path.dirname(ASSET))
+        sizes = {(f.width(), f.height()) for f in player.frames}
+        self.assertEqual(len(sizes), 1, "帧尺寸必须统一, 否则站位会飘")
+        self.assertGreater(player.sprite_aspect, 0.4)
+
+    def test_sunflower_gets_wider_window_than_owl(self):
+        pet = PetWidget()
+        self.addCleanup(pet.close)
+        pet.character = "owl"
+        pet.player.set_character("owl")
+        pet.set_size(210)
+        w_owl = pet.width()
+        pet.character = "sunflower"
+        pet.player.set_character("sunflower")
+        pet.set_size(210)
+        self.assertGreaterEqual(pet.width(), w_owl)
+
+    def test_wave_clip_plays_the_waving_frames(self):
+        from animation import SpritePlayer
+        player = SpritePlayer(os.path.dirname(ASSET))
+        player.play("wave", 0.0)
+        seen = {player.sample(i / 60) for i in range(int(1.6 * 60))}
+        self.assertIn(17, seen)   # 招手帧
+        self.assertIn(8, seen)    # 收半帧
+        self.assertEqual(seen & {18}, {18})
+
+
+class TrainingTests(unittest.TestCase):
+    def test_steady_taps_fit_metronome(self):
+        pet = PetWidget()
+        self.addCleanup(pet.close)
+        pet._music_mode = "off"
+        pet._train_taps = [[i * 0.5, 0.05, 65 + i] for i in range(10)]
+        pet._train_until = 10.0
+        pet._finish_training()
+        self.assertEqual(pet._music_mode, "metronome")
+        self.assertAlmostEqual(pet.player.rock_period, 0.5, delta=0.03)
+        self.assertGreater(pet._train_demo_until, 0)
+
+    def test_long_holds_fit_opera(self):
+        pet = PetWidget()
+        self.addCleanup(pet.close)
+        pet._music_mode = "rock"
+        pet._train_taps = [[i * 0.7, 0.45, 65 + i] for i in range(10)]
+        pet._train_until = 10.0
+        pet._finish_training()
+        self.assertEqual(pet._music_mode, "opera")
+        self.assertFalse(pet.player.rocking)   # 美声不摇帧, 由乐句缓动
+
+    def test_too_few_taps_keeps_mode(self):
+        pet = PetWidget()
+        self.addCleanup(pet.close)
+        pet._music_mode = "rock"
+        pet._train_taps = [[0.0, 0.05, 65], [0.5, 0.05, 66]]
+        pet._train_until = 10.0
+        pet._finish_training()
+        self.assertEqual(pet._music_mode, "rock")
 
 
 class OperaNoteTests(unittest.TestCase):

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 import providers as prov
 import paths
 from pet import PetWidget, ASSET
+from applaunch import _visible_windows
 
 ICON = paths.resource_path("assets", "icon.png")  # 大脸 app 图标(托盘/任务栏)
 from panel import Dashboard, ManualEditDialog
@@ -277,6 +278,28 @@ class App(QObject):
         self.pet.moved.connect(self.on_pet_moved)
         self.pet.glass_changed.connect(self.board.apply_glass)
         self.board.apply_glass(self.pet.panel_glass)
+        self.board.provider_activated.connect(self.on_provider_activate)
+
+    def on_provider_activate(self, pid):
+        """面板里点了服务图标: 把对应应用窗口提到最前, 没开就按 launch 启动。"""
+        cfg = next((c for c in self.cfg.get("providers", []) if c["id"] == pid), None)
+        if not cfg:
+            return
+        procs = [p.lower() for p in cfg.get("processes") or []]
+        if procs:
+            for hwnd, path, _title in _visible_windows():
+                if os.path.basename(path).lower() in procs:
+                    import ctypes
+                    user32 = ctypes.windll.user32
+                    if user32.IsIconic(hwnd):
+                        user32.ShowWindow(hwnd, 9)          # SW_RESTORE
+                    user32.SetForegroundWindow(hwnd)
+                    return
+        launch = cfg.get("launch")
+        if launch and os.path.exists(launch):
+            subprocess.Popen([launch], cwd=os.path.dirname(launch))
+            return
+        self.pet.react("pet", "没找到 %s 的窗口" % cfg.get("name", pid))
 
         self.timer = QTimer()           # 调度器: 每 15 秒检查一次谁到期
         self.timer.timeout.connect(self.schedule_tick)

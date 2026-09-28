@@ -145,5 +145,52 @@ class CleanPanelTests(unittest.TestCase):
         self.assertLess(y,20+360*.95)
         pet.close()
 
+    def test_usable_providers_pinned_as_cards(self):
+        cfg={'providers':[{'id':'a','name':'A','type':'manual'},
+                          {'id':'b','name':'B','type':'manual'},
+                          {'id':'c','name':'C','type':'codex'}]}
+        data={'a':{'ok':True,'remaining':50,'total':100},
+              'b':{'ok':True,'remaining':0,'total':100},
+              'c':{'ok':False}}
+        board=Dashboard()
+        board.set_data(cfg,data)
+        board.show()
+        qt.processEvents()
+        # 可用的 A 排最前并带卡片强调; 耗尽的 B/未连接的 C 扁平沉底
+        self.assertEqual(board.cards[0].cfg['id'],'a')
+        self.assertEqual(board.cards[0].objectName(),'cardLive')
+        self.assertEqual(board.cards[1].objectName(),'')
+        self.assertEqual(board.cards[2].objectName(),'')
+        self.assertLess(board.cards[0].y(),board.cards[1].y())
+        board.close()
+
+    def test_halo_includes_drained_and_missing_as_gray(self):
+        pet=PetWidget()
+        cfg=[{"id":"a","name":"A"},{"id":"b","name":"B"},{"id":"c","name":"C"}]
+        pet.set_status({"a":{"ok":True,"remaining":0,"total":100},
+                        "b":{"ok":False}}, cfg)
+        self.assertEqual([e[0] for e in pet.orbit],["a","b","c"])
+        self.assertTrue(all(e[2] for e in pet.orbit))
+        pet.close()
+
+    def test_provider_icon_click_emits_activate(self):
+        from PySide6.QtCore import Qt, QPoint
+        from PySide6.QtTest import QTest
+        from panel import ProviderIcon
+        cfg={'providers':[{'id':'zcode','name':'ZCode','type':'zcode',
+                           'processes':['ZCode.exe']}]}
+        data={'zcode':{'ok':True,'remaining':5,'total':30}}
+        board=Dashboard()
+        board.set_data(cfg,data)
+        got=[]
+        board.provider_activated.connect(got.append)
+        board.show()
+        qt.processEvents()
+        icon=board.cards[0].findChildren(ProviderIcon)[0]
+        QTest.mouseClick(icon, Qt.LeftButton, pos=QPoint(5,5))
+        self.assertEqual(got,['zcode'])
+        board.close()
+
+
 if __name__=='__main__':
     unittest.main()

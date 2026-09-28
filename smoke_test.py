@@ -48,6 +48,14 @@ def main():
                              "remaining_percent": 49, "used_percent": 51,
                              "duration_minutes": 10080,
                              "resets_at": int(__import__("time").time()) + 172000}]},
+        "zcode":       {"ok": True, "remaining": 6.7, "total": 30, "unit": "万tok",
+                        "note": "今日 · GLM-5.3-Flash 200万 · GLM-5.3 30万 · 50 次请求",
+                        "source": "ZCode 本地会话库", "error": None,
+                        "windows": [
+                            {"id": "zcode:day", "label": "今日预算", "bucket": "ZCode",
+                             "remaining_percent": 22.3, "used_percent": 77.7,
+                             "duration_minutes": 1440, "daily": True,
+                             "resets_at": int(__import__("time").time()) + 50300}]},
         "cursor":      {"ok": True, "remaining": 320, "total": 500,
                         "unit": "次请求", "note": "", "error": None},
         "trae":        {"ok": True, "remaining": 96, "total": 600,
@@ -58,7 +66,8 @@ def main():
     history = []
     base = 1758800000
     for i in range(24):
-        for pid, pct in [("cursor", 95 - i * 1.5), ("trae", 100 - i * 3.2)]:
+        for pid, pct in [("cursor", 95 - i * 1.5), ("trae", 100 - i * 3.2),
+                         ("codex", 90 - i * 1.8)]:
             history.append({"ts": base + i * 3600 * 13, "id": pid,
                             "pct": max(2, pct)})
 

@@ -71,11 +71,14 @@ class ZcodeTests(unittest.TestCase):
                     " status TEXT, started_at INTEGER, input_tokens INTEGER,"
                     " output_tokens INTEGER, computed_total_tokens INTEGER)")
         now_ms = int(time.time() * 1000)
+        # 相对「今日零点」造数据, 避免午夜附近跑测试时"几小时前"跨天
+        mid_ms = int(datetime.combine(datetime.now().date(),
+                                      datetime.min.time()).timestamp() * 1000)
         rows = [
-            ("GLM-5.3", "completed", now_ms - 3600 * 1000, 1000, 500, 1500),
+            ("GLM-5.3", "completed", mid_ms + 60 * 1000, 1000, 500, 1500),
             ("GLM-5.3", "completed", now_ms - 60 * 1000, 2000, 1000, 3000),
             ("GLM-5.3-Flash", "completed", now_ms - 30 * 1000, 100, 100, 200),
-            ("GLM-5.3", "completed", now_ms - 26 * 3600 * 1000, 99999, 99999, 199998),
+            ("GLM-5.3", "completed", mid_ms - 60 * 1000, 99999, 99999, 199998),
             ("GLM-5.3-Flash", "error", now_ms - 1000, 500, 500, 1000),
         ]
         con.executemany("INSERT INTO model_usage (model_id, status, started_at,"

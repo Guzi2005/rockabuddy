@@ -1,7 +1,7 @@
 import unittest
 from PySide6.QtCore import QRectF
 from PySide6.QtWidgets import QApplication, QLabel
-from panel import Dashboard, UsageCard
+from panel import Dashboard, UsageCard, SEG_REMAIN, SEG_TODAY, SEG_BEFORE
 from animation import SpritePlayer, SUNFLOWER_DANCE_FRAMES, SUNFLOWER_HOLD_FRAME
 from pet import PetWidget, ASSET
 import os
@@ -9,7 +9,7 @@ import os
 qt=QApplication.instance() or QApplication([])
 
 class CleanPanelTests(unittest.TestCase):
-    def test_original_grid_and_refresh_are_preserved(self):
+    def test_single_column_rows_are_preserved(self):
         cfg={'providers':[{'id':'codex','name':'Codex','type':'codex'},
                           {'id':'manual','name':'Manual','type':'manual'}]}
         data={'codex':{'ok':True,'windows':[
@@ -21,12 +21,43 @@ class CleanPanelTests(unittest.TestCase):
         qt.processEvents()
         self.assertEqual(len(board.cards),2)
         self.assertEqual(board.width(),320)
-        self.assertEqual(board.cards[0].height(),board.cards[1].height())
-        self.assertEqual(board.cards[0].y(),board.cards[1].y())
-        self.assertIs(board.items.itemAtPosition(0,1).widget(),board.cards[1])
+        # 一排一个: 两行上下排开, 不再等高对齐
+        self.assertLess(board.cards[0].y(),board.cards[1].y())
+        self.assertEqual(board.items.count(),2)
         board.set_data(cfg,data)
         qt.processEvents()
         self.assertEqual(len(board.cards),2)
+        board.close()
+
+    def test_bar_segments_split_today_and_before(self):
+        card=UsageCard({'id':'x','name':'X','type':'manual'},
+                       {'ok':True,'remaining':60,'total':100}, baseline=80.0)
+        self.assertEqual([(round(p), c) for p, c in card._segments(60.0, daily=False)],
+                         [(60, SEG_REMAIN), (20, SEG_TODAY), (20, SEG_BEFORE)])
+        # 日窗(如 ZCode 预算): 消耗全部算今天
+        self.assertEqual([(round(p), c) for p, c in card._segments(40.0, daily=True)],
+                         [(40, SEG_REMAIN), (60, SEG_TODAY)])
+        # 没有历史基线: 分不出今天, 只有 剩余+已耗 两段
+        card.baseline=None
+        self.assertEqual([(round(p), c) for p, c in card._segments(60.0, daily=False)],
+                         [(60, SEG_REMAIN), (40, SEG_BEFORE)])
+        card.close()
+
+    def test_multi_window_quota_renders_one_bar_per_window(self):
+        from PySide6.QtWidgets import QWidget
+        cfg={'providers':[{'id':'codex','name':'Codex','type':'codex'}]}
+        data={'codex':{'ok':True,'remaining':8,'total':100,'windows':[
+            {'label':'5 小时','remaining_percent':8,'resets_at':2000000000},
+            {'label':'本周','remaining_percent':84,'resets_at':2000000000}]}}
+        board=Dashboard()
+        board.set_data(cfg,data)
+        board.show()
+        qt.processEvents()
+        card=board.cards[0]
+        # seg_bar 的 holder: 固定高 5px 且带布局(色块 chunk 没有布局, 被排除)
+        bars=[w for w in card.findChildren(QWidget)
+              if w.height()==5 and w.layout() is not None]
+        self.assertEqual(len(bars),2)
         board.close()
 
     def test_sunflower_never_loads_or_dances_bad_frames(self):

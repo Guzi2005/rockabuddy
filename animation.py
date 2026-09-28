@@ -1,6 +1,7 @@
 """Time-based sprite player. Render cadence is independent of sprite timing."""
 import math
 import os
+import random
 from PySide6.QtCore import Qt, QPointF, QRect, QRectF
 from PySide6.QtGui import QImage, QPainter, QPixmap, QBitmap, QRegion
 
@@ -22,6 +23,9 @@ CLIPS = {
     "deskblink": [(22, .10), (20, .10)],
     # 被摇晃后的眩晕: 螺旋眼定格, 配合 pet 里的摆动余韵
     "dizzy": [(23, 2.8)],
+    # 伸懒腰(自主待机): 借举图标的蓄势-展臂帧, 举到最高停留再按原路放下
+    "stretch": [(25, .14), (34, .11), (35, .38), (26, .60),
+                (35, .11), (34, .11), (25, .15), (0, .24)],
 }
 
 FADE = 0  # 帧切换不做交叉淡化: 密集帧序列下反复重开淡化会一直半透明闪白, 硬切更干净
@@ -44,7 +48,9 @@ class SpritePlayer:
         self._load_frames()
         self.clip = "idle"
         self.started = 0.0
-        self.next_blink = 3.4
+        self.next_blink = 2.5 + 4.0 * random.random()   # 眨眼间隔随机化
+        self._blink_twice = False        # 连眨两下
+        self.dozing = False              # 打盹(自主待机, 由 pet 置位/唤醒)
         self.frame_index = 0
         self._fade_from = None   # 上一帧编号, 用于交叉淡入
         self._fade_at = 0.0
@@ -64,6 +70,7 @@ class SpritePlayer:
         self.clip = "idle"
         self.hold_frame = None
         self.rocking = False
+        self.dozing = False
         self._fade_from = None
         self._fade_strength = 1.0
         self.frame_index = 0
@@ -121,6 +128,14 @@ class SpritePlayer:
     def _dizzy_frame(self, now):
         s = math.sin(now * 9.5)
         return 33 if s > .35 else (32 if s < -.35 else 23)
+
+    def _after_clip(self, finished, now):
+        """小剪辑播完: 连眨的眨眼立即补第二次, 其余随机排下一次眨眼(2.5-6.5s)。"""
+        if finished == "blink" and self._blink_twice:
+            self._blink_twice = False
+            self.play("blink", now)
+        else:
+            self.next_blink = now + 2.5 + 4.0 * random.random()
 
     def _sample_sunflower(self, now):
         """向日葵(原版愿望): 整支 25 帧舞蹈循环, 一拍跳完整支; 安静时 60bpm 轻摆。
@@ -180,8 +195,8 @@ class SpritePlayer:
                     self._set(index, now, fade=duration >= FADE)
                     return index
                 elapsed -= duration
-            self.clip = "idle"
-            self.next_blink = now + 3.2 + .7 * math.sin(now)
+            finished, self.clip = self.clip, "idle"
+            self._after_clip(finished, now)
         if self.hold_frame is not None and now < self.hold_until:
             # 定格(如举图标): 期间不眨眼不抖耳
             index = self.hold_frame % len(self.frames) if self.frames else self.hold_frame
@@ -208,13 +223,24 @@ class SpritePlayer:
                 index = (ROCK_L if s < 0 else ROCK_R)[level]
             self._set(index, now)
             return index
+        if self.dozing:
+            # 打盹: 闭眼帧定住, 不眨眼不抖耳(pet 侧负责唤醒与 Zzz 粒子)
+            if desk and len(self.frames) > 22:
+                self._set(22, now)
+            else:
+                self._set(2, now)
+            return self.frame_index
         if now >= self.next_blink:
             if desk and len(self.frames) > 22:
                 # 办公桌模式: 用带笔记本的专用眨眼帧, 不切回全身
                 self.play("deskblink", now)
             else:
-                # 空闲小动作轮换: 约 1/4 概率抖耳朵, 其余眨眼
-                self.play("twitch" if math.sin(now * 7.31) > 0.62 else "blink", now)
+                # 空闲小动作轮换: 约 1/4 概率抖耳朵, 其余眨眼(偶发连眨两下)
+                if math.sin(now * 7.31) > 0.62:
+                    self.play("twitch", now)
+                else:
+                    self._blink_twice = random.random() < .14
+                    self.play("blink", now)
         if desk and len(self.frames) > 24:
             # 办公桌模式(笔记本烤进帧): 每个按键按一下, 左右爪交替, 停手搭键盘
             if paw == 1:

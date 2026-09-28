@@ -5,7 +5,7 @@ import time
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (QWidget, QFrame, QLabel, QPushButton, QVBoxLayout,
-    QHBoxLayout, QGridLayout, QProgressBar, QDialog, QLineEdit, QSizePolicy, QLayout)
+    QHBoxLayout, QDialog, QLineEdit, QSizePolicy)
 from credentials import save_secret
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,8 +15,6 @@ STYLE = """
 QWidget {font-family:'Microsoft YaHei UI';font-size:11px;color:#30474a;}
 QWidget#panel {background:#f4f4f0;border:1px solid #d9dcd2;border-radius:18px;}
 QWidget#header {background:#121b1d;border-top-left-radius:17px;border-top-right-radius:17px;}
-QFrame#card {background:#ffffff;border:1px solid #e6e8df;border-radius:12px;}
-QFrame#cardDrained {background:#eef0ea;border:1px dashed #cfd3c6;border-radius:12px;}
 QFrame#hero {background:#141a1a;border:0;border-radius:14px;}
 QLabel {background:transparent;border:0;}
 QLabel#muted {color:#788784;font-size:10px;}
@@ -217,34 +215,55 @@ class ConnectDialog(QDialog):
         self.accept()
 
 
+SEG_REMAIN, SEG_TODAY, SEG_BEFORE = "#5fae9f", "#e0a458", "#c2c7ba"
+
+
+def seg_bar(segments, drained=False):
+    """三段横条: 剩余 / 今日已耗 / 此前已耗, 宽度按百分比分配, 零段不画。"""
+    holder = QWidget()
+    holder.setFixedHeight(5)
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(1)
+    for pct, color in segments:
+        if pct <= 0.05:
+            continue
+        chunk = QFrame()
+        chunk.setFixedHeight(5)
+        chunk.setStyleSheet("background:%s;border-radius:1px;"
+                            % ("#b9bfc0" if drained else color))
+        row.addWidget(chunk, max(1, int(round(pct))))
+    return holder
+
+
 class UsageCard(QFrame):
-    """网格小卡: 图标+名称+徽章 / 强调重置时间或余量数字 / 细进度条。"""
+    """一排一个服务: 图标+名称+徽章+强调值一行, 下方每个额度窗口一条三段横条。
+    不加卡片底色, 靠排版分层。"""
     edited = Signal(str, float, object)
     connected = Signal()
 
-    def __init__(self, cfg, data, color="#5fae9f", parent=None):
+    def __init__(self, cfg, data, color="#5fae9f", baseline=None, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.cfg, self.data = cfg, data
+        self.baseline = baseline   # 今日零点前最后一次同步到的服务剩余%(分不出就 None)
         self.countdowns = []
         root = QVBoxLayout(self)
-        root.setContentsMargins(9, 8, 9, 8)
-        root.setSizeConstraint(QLayout.SetMinimumSize)
-        root.setSpacing(4)
+        root.setContentsMargins(4, 5, 4, 3)
+        root.setSpacing(3)
 
         pct = service_pct(data)
         drained = (data.get("ok") and not data.get("stale")
                    and pct is not None and pct <= 0.5)
-        self.setObjectName("cardDrained" if drained else "card")
         kind = cfg.get("type")
 
+        # ---- 行 1: 图标 名称 徽章 …… 强调值 ----
         top = QHBoxLayout()
-        top.setSpacing(4)
+        top.setSpacing(5)
         top.addWidget(icon_widget(cfg["id"], color, 20, gray=drained))
         name = label(cfg.get("name", "?"))
         name.setStyleSheet("font-weight:700;font-size:11px" + (";color:#98a09a" if drained else ""))
         top.addWidget(name)
-        top.addStretch()
         if kind == "manual":
             key = "manual"
         elif data.get("stale"):
@@ -260,79 +279,101 @@ class UsageCard(QFrame):
         text, bg, fg = BADGES[key]
         badge = label(text)
         badge.setStyleSheet("background:%s;color:%s;border-radius:6px;padding:0px 4px;font-size:9px;" % (bg, fg))
-        badge.setFixedHeight(18)
+        badge.setFixedHeight(16)
         top.addWidget(badge, 0, Qt.AlignVCenter)
-        root.addLayout(top)
-
-        # 强调区: 有重置机制的突出「下次复活」, 其余突出剩余量
-        resets = next_reset(data)
+        top.addStretch()
         strong = "#98a09a" if drained else "#1d2a2b"
+        resets = next_reset(data)
         if resets:
             soon = resets - time.time() < 20 * 3600
             fmt = "%H:%M" if soon else "%m/%d %H:%M"
-            when = label(time.strftime(fmt, time.localtime(resets)) + " 复活")
-            when.setStyleSheet("font-size:13px;font-weight:800;color:%s;" % strong)
-            root.addWidget(when)
+            value = label(time.strftime(fmt, time.localtime(resets)) + " 复活")
+            value.setStyleSheet("font-size:12px;font-weight:800;color:%s;" % strong)
+            top.addWidget(value)
             self._cd = label("", "muted")
             self.countdowns.append((self._cd, resets))
-            root.addWidget(self._cd)
         elif data.get("ok") and data.get("remaining") is not None:
             unit = data.get("unit", "")
             remaining = data["remaining"]
             if unit == "¥":
-                value = "¥ %.2f" % remaining
+                value = label("¥ %.2f" % remaining)
             elif data.get("total"):
-                value = "%g/%g %s" % (remaining, data["total"], unit)
+                value = label("%g/%g %s" % (remaining, data["total"], unit))
             else:
-                value = "%g %s" % (remaining, unit)
-            number = label(value)
-            number.setStyleSheet("font-size:13px;font-weight:800;color:%s;" % strong)
-            root.addWidget(number)
-            window = lowest_window(data)
-            tip = label("剩 %.0f%%" % window["remaining_percent"] if window is not None
-                        else (data.get("note") or ""), "muted")
-            root.addWidget(tip)
+                value = label("%g %s" % (remaining, unit))
+            value.setStyleSheet("font-size:12px;font-weight:800;color:%s;" % strong)
+            top.addWidget(value)
         else:
-            root.addWidget(label("待连接" if not data.get("ok") else "--", "muted"))
-        note = data.get("note") or (data.get("error") or "")  # 附注收进 tooltip
-        if kind == "manual":
-            action = QPushButton("更新")
-            action.setFixedHeight(20)
-            action.clicked.connect(self.configure)
-            root.addWidget(action)
-        elif kind in ("moonshot", "kimi", "kimi_coding", "siliconflow") and not data.get("ok"):
-            action = QPushButton("连接")
-            action.setFixedHeight(20)
-            action.clicked.connect(self.configure)
-            root.addWidget(action)
+            top.addWidget(label("待连接", "muted"))
+        root.addLayout(top)
 
-        if pct is not None:
-            bar = QProgressBar()
-            bar.setRange(0, 1000)
-            bar.setValue(round(max(0, min(100, pct)) * 10))
-            bar.setTextVisible(False)
-            bar.setFixedHeight(4)
-            if drained:
-                bar.setStyleSheet("QProgressBar::chunk{background:#b9bfc0;border-radius:2px}")
-            elif pct < 30:
-                bar.setStyleSheet("QProgressBar::chunk{background:#c96a4a;border-radius:2px}")
-            root.addWidget(bar)
+        # ---- 行 2: muted 说明(倒计时/附注) + 手动更新/连接按钮 ----
+        note = data.get("error") or data.get("note") or ""
+        second = QHBoxLayout()
+        second.setSpacing(6)
+        if resets:
+            second.addWidget(self._cd)
+        elif note:
+            muted = label(note, "muted")
+            muted.setWordWrap(True)
+            second.addWidget(muted, 1)
+        if kind == "manual":
+            second.addStretch()
+            action = QPushButton("更新")
+            action.setFixedHeight(18)
+            action.clicked.connect(self.configure)
+            second.addWidget(action)
+        elif kind in ("moonshot", "kimi", "kimi_coding", "siliconflow") and not data.get("ok"):
+            second.addStretch()
+            action = QPushButton("连接")
+            action.setFixedHeight(18)
+            action.clicked.connect(self.configure)
+            second.addWidget(action)
+        if second.count():
+            root.addLayout(second)
+
+        # ---- 额度窗口横条: 一窗一条, 三段=剩余/今日已耗/此前已耗 ----
+        windows = (data.get("windows") or [])[:3]
+        for window in windows:
+            remain = max(0.0, min(100.0, window.get("remaining_percent", 100)))
+            bar_row = QHBoxLayout()
+            bar_row.setSpacing(5)
+            tag = label(window.get("label", ""), "muted")
+            tag.setFixedWidth(46)
+            bar_row.addWidget(tag)
+            bar_row.addWidget(seg_bar(self._segments(remain, bool(window.get("daily"))),
+                                      drained), 1)
+            show = label("%.0f%%" % remain, "muted")
+            show.setFixedWidth(30)
+            show.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            bar_row.addWidget(show)
+            root.addLayout(bar_row)
+        if not windows and pct is not None:
+            root.addWidget(seg_bar(self._segments(pct, False), drained))
+
         tip_lines = []
         for w in data.get("windows") or []:
             line = "%s 剩 %.0f%%" % (w.get("label", ""), w.get("remaining_percent", 0))
             if w.get("resets_at"):
                 line += " · %s 重置" % time.strftime("%m/%d %H:%M", time.localtime(w["resets_at"]))
             tip_lines.append(line)
-        tip_lines += [data.get("source", ""), note]
+        tip_lines += [data.get("source", ""), data.get("note") or ""]
         tip_lines.append(("更新于 " + time.strftime("%m/%d %H:%M:%S", time.localtime(data["fetched_at"])))
                          if data.get("fetched_at") else "尚无同步记录")
         self.setToolTip("\n".join(t for t in tip_lines if t))
-
-        # 附注类长文本换行而不是撑宽卡片
-        for lab in self.findChildren(QLabel):
-            if lab.objectName() == "muted":
-                lab.setWordWrap(True)
         self.tick()
+
+    def _segments(self, remain_pct, daily):
+        """三段拆分: 日窗的消耗全算今天; 其余按今日零点前的历史基线拆
+        (没有基线就只有 剩余+已耗 两段)。"""
+        used = 100.0 - remain_pct
+        if daily:
+            return [(remain_pct, SEG_REMAIN), (used, SEG_TODAY)]
+        if self.baseline is None:
+            return [(remain_pct, SEG_REMAIN), (used, SEG_BEFORE)]
+        used_today = max(0.0, min(used, self.baseline - remain_pct))
+        return [(remain_pct, SEG_REMAIN), (used_today, SEG_TODAY),
+                (used - used_today, SEG_BEFORE)]
 
     def tick(self):
         for widget, timestamp in self.countdowns:
@@ -360,7 +401,7 @@ class Dashboard(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("TokenSpy · 用量小管家")
+        self.setWindowTitle("Rockabuddy · 用量小管家")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._drag_pos = None
@@ -437,12 +478,10 @@ class Dashboard(QWidget):
         hero_layout.addLayout(right)
         body_root.addWidget(hero)
 
-        # ---- 服务卡片: 两列网格, 一屏放下 ----
-        self.items = QGridLayout()
+        # ---- 服务行: 一排一个, 无卡片底, 一屏放下 ----
+        self.items = QVBoxLayout()
         self.items.setContentsMargins(0, 0, 0, 0)
-        self.items.setSpacing(6)
-        self.items.setColumnStretch(0, 1)
-        self.items.setColumnStretch(1, 1)
+        self.items.setSpacing(9)
         body_root.addLayout(self.items)
         body_root.addStretch()
 
@@ -471,6 +510,14 @@ class Dashboard(QWidget):
     def set_sync_info(self, text):
         self.footer.setText(text)
 
+    def _day_baseline(self, pid, midnight):
+        """该服务今日零点前最后一次记录的剩余%(history 按时间追加, 取最后一个)。"""
+        base = None
+        for row in self.history:
+            if row.get("id") == pid and row.get("ts", 0) <= midnight:
+                base = row.get("pct")
+        return base
+
     def _pick_hero(self):
         """下次复活 = 所有窗口里最近的重置点; 没有则退到余量最低的服务。"""
         best = None
@@ -497,21 +544,17 @@ class Dashboard(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self.cards = []
-        configs = self.cfg.get("providers", [])
-        for index, cfg in enumerate(configs):
+        # 今日零点: 用于把消耗拆成「今日/此前」两段(取零点前最后一次同步的剩余%)
+        midnight = time.mktime(time.strptime(
+            time.strftime("%Y-%m-%d") + " 00:00:00", "%Y-%m-%d %H:%M:%S"))
+        for index, cfg in enumerate(self.cfg.get("providers", [])):
             card = UsageCard(cfg, self.results.get(cfg["id"], {}),
-                             PALETTE[index % len(PALETTE)])
+                             PALETTE[index % len(PALETTE)],
+                             baseline=self._day_baseline(cfg["id"], midnight))
             card.edited.connect(self.manual_edited)
             card.connected.connect(self.refresh_requested)
-            self.items.addWidget(card, index // 2, index % 2)
+            self.items.addWidget(card)
             self.cards.append(card)
-
-        # 同排卡片等高，保持标题与底边齐整。
-        for index in range(0, len(self.cards), 2):
-            row = self.cards[index:index + 2]
-            height = max(card.sizeHint().height() for card in row)
-            for card in row:
-                card.setFixedHeight(height)
 
         pick, is_lowest = self._pick_hero()
         if pick is None:

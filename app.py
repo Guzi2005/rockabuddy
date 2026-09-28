@@ -30,6 +30,15 @@ FONT = "Microsoft YaHei UI"
 RESET_GRACE = 20          # 窗口到期后宽限几秒再拉取
 QUIT_SYNC_BUDGET = 6.0    # 退出同步总预算(秒)
 
+
+def single_instance_lock():
+    """命名互斥量防多开: 重复启动时托盘会出现两份、轮询翻倍。返回是否拿到锁。"""
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\Rockabuddy")
+    return ctypes.windll.kernel32.GetLastError() != 183   # ERROR_ALREADY_EXISTS
+
 def load_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -244,7 +253,7 @@ class App(QObject):
         self.timer.start(15 * 1000)
 
         self.tray = QSystemTrayIcon(QIcon(ICON), self.pet)
-        self.tray.setToolTip("TokenSpy · AI 用量小管家")
+        self.tray.setToolTip("Rockabuddy · AI 用量小管家")
         menu = QMenu()
         menu.addAction("打开 / 收起看板", self.toggle_board)
         menu.addAction("找回桌宠", self.restore_pet)
@@ -455,4 +464,9 @@ class App(QObject):
 
 
 if __name__ == "__main__":
+    if not single_instance_lock():
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            None, "Rockabuddy 已经在运行啦（去托盘找找）", "Rockabuddy", 0x40)
+        sys.exit(0)
     App().run()

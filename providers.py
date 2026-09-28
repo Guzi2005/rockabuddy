@@ -386,7 +386,7 @@ def fetch_zcode(cfg):
         result["total"] = round(budget / 1e4, 2)
         result["windows"] = [{"id": "zcode:day", "label": "今日预算", "bucket": "ZCode",
                               "remaining_percent": pct, "used_percent": 100 - pct,
-                              "duration_minutes": 1440,
+                              "duration_minutes": 1440, "daily": True,
                               "resets_at": midnight + timedelta(days=1).total_seconds()}]
     else:
         result["remaining"] = round(used / 1e4, 2)

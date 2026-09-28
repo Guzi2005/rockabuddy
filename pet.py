@@ -2,15 +2,46 @@
 import ctypes
 import math
 import os
+import random
 import time
 from animation import SpritePlayer, SUNFLOWER_HOLD_FRAME, SUNFLOWER_PALM, SUNFLOWER_LIFT_SECONDS
 
 from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QSettings, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 ASSET = os.path.join(os.path.dirname(__file__), "assets", "companion.png")
 DESK_FIT = 0.89  # 办公桌帧构图偏大, 按头发宽度对齐站立体型(133px/150px)
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NAME = "Rockabuddy"
+
+
+def autostart_enabled():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            winreg.QueryValueEx(key, RUN_NAME)
+            return True
+    except OSError:
+        return False
+
+
+def set_autostart(enable):
+    """开机自启开关: HKCU Run 键指向本环境的 pythonw + app.py。"""
+    import sys
+    import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+        if not enable:
+            try:
+                winreg.DeleteValue(key, RUN_NAME)
+            except FileNotFoundError:
+                pass
+            return
+        exe = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if not os.path.isfile(exe):
+            exe = sys.executable
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
+        winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, '"%s" "%s"' % (exe, script))
 
 
 def ease_out_back(t):
@@ -24,7 +55,7 @@ class PetWidget(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("TokenSpy · 猫头鹰桌宠")
+        self.setWindowTitle("Rockabuddy · 猫头鹰桌宠")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setCursor(Qt.PointingHandCursor)
@@ -89,6 +120,14 @@ class PetWidget(QWidget):
         self._listener = None
         self._animate = self.settings.value("animate", True, type=bool)
         self._desk = self.settings.value("desk", False, type=bool)
+        # 光标跟踪: 身体朝光标方向的微小偏移(px)
+        self._gaze_x = 0.0
+        self._gaze_y = 0.0
+        # 自主待机: 伸懒腰/抖耳朵/打盹, 无人理她时触发
+        self._doze_until = -10.0
+        self._next_z = 0.0            # 下一个 Zzz 粒子的时刻
+        self._next_quirk = 25.0 + random.random() * 20
+        self._last_interaction = 0.0
         self.set_size(self.settings.value("height", 210, type=int))
         screen = QApplication.primaryScreen().availableGeometry()
         pos = self.settings.value("position", QPoint(screen.right() - self.width() - 30,
@@ -255,6 +294,10 @@ class PetWidget(QWidget):
         self._beat_strength = strength
         self._beat_dir *= -1            # 左右交替摇摆
         self._music_on = True
+        self._last_interaction = now
+        if self.player.dozing:          # 音乐响起自然醒, 不出声
+            self.player.dozing = False
+            self._doze_until = -10.0
         if period > 0:
             self._beat_period = period
         if self._animate and self._rock and self._drag_pos is None:
@@ -274,7 +317,8 @@ class PetWidget(QWidget):
                 min(40 + (self._full_h - 44) * .28, self.height() * .55),  # 头部高度(办公桌模式压低)
                 side * (4 + 5 * strength),                      # 向外漂移
                 "♫" if strength > .55 else "♪",
-                38 + round(18 * strength)])
+                38 + round(18 * strength),
+                34.0])
 
     def _on_quiet(self):
         self._music_on = False
@@ -361,9 +405,94 @@ class PetWidget(QWidget):
                 # 眩晕余韵: 脚底锚点不变, 上身快速摆动并衰减
                 decay = (self._dizzy_until - self._now) / 2.8
                 self._target_tilt = math.sin(self._now * 9.5) * 7 * decay
+            self._track_cursor(delta)
+            self._idle_quirks()
+            if self._doze_until > self._now and self._animate:
+                self._doze_zzz()
             if self._desk and self._animate:
                 self._scan_typing()
+            self._adapt_fps()
             self.update()
+
+    def _track_cursor(self, delta):
+        """光标跟踪: 靠得近时身体微微转向光标方向, 走远了慢慢回正。"""
+        if not self._animate or self._drag_pos is not None or self._now < self._dizzy_until:
+            return
+        local = self.mapFromGlobal(QCursor.pos())
+        dx = local.x() - self.width() / 2
+        dy = local.y() - self.height() * .42
+        near = math.hypot(dx, dy) < 170
+        gx = max(-1.0, min(1.0, dx / 170.0))
+        gy = max(-1.0, min(1.0, dy / 170.0))
+        ease = 1 - math.exp(-9 * delta)
+        self._gaze_x += ((gx * 3.0 if near else 0.0) - self._gaze_x) * ease
+        self._gaze_y += ((gy * 2.2 if near else 0.0) - self._gaze_y) * ease
+        if not self.player.rocking:
+            if near and not self.player.dozing:
+                self._target_tilt = max(-4.0, min(4.0, gx * 4.0))
+            else:
+                self._target_tilt += (0.0 - self._target_tilt) * ease
+
+    def _idle_quirks(self):
+        """自主待机: 无人理她时随机伸懒腰/抖耳朵, 太久没互动就打盹冒 Zzz。"""
+        if self._doze_until > 0 and self._now >= self._doze_until:
+            self._doze_until = -10.0          # 睡够自己醒, 不出声
+            self.player.dozing = False
+        if not (self._animate and self._drag_pos is None and not self._hover
+                and self._now > self._reaction_until
+                and self.player.clip == "idle" and self.player.hold_frame is None
+                and not self.player.rocking and not self._music_on
+                and self._now >= self._dizzy_until
+                and self._doze_until <= self._now
+                and self._now >= self._next_quirk):
+            return
+        idle_for = self._now - self._last_interaction
+        roll = random.random()
+        if idle_for > 240 and roll < .45:
+            self._doze_until = self._now + 45 + random.random() * 40
+            self.player.dozing = True
+            self._next_z = self._now + .8
+        elif roll < .60:
+            self.player.play("stretch", self._now)
+        else:
+            self.player.play("twitch", self._now)
+        self._next_quirk = self._now + 35 + random.random() * 45
+
+    def _doze_zzz(self):
+        """打盹时从头顶慢慢冒 Z 粒子。"""
+        if self._now >= self._next_z and len(self._notes) < 8:
+            self._next_z = self._now + 1.1 + random.random() * .5
+            self._notes.append([
+                self._now,
+                self.width() * .60 + random.random() * 8,
+                min(40 + (self._full_h - 44) * .26, self.height() * .42),
+                5 + random.random() * 4,          # 向右缓漂
+                "Z",
+                15 + round(random.random() * 7),
+                15.0])                            # 上升速度(px/s), 比音符慢
+
+    def _wake(self, text="嗯?我在!"):
+        if self._doze_until > 0 and self._now < self._doze_until:
+            self._doze_until = -10.0
+            self.player.dozing = False
+            self.react("pet", text)
+
+    def _adapt_fps(self):
+        """静息降帧: 没有任何动画/交互时降到 ~8fps, 省下透明窗口的重绘开销。"""
+        if not self._animate:
+            return
+        active = bool(
+            self.player.clip != "idle" or self.player.hold_frame is not None
+            or self.player.rocking or self._music_on or self._notes
+            or self._launch_pix is not None or self._trophy
+            or self._hover or self._drag_pos is not None
+            or self._now < self._reaction_until or self._now < self._dizzy_until
+            or self._doze_until > self._now or self._desk
+            or abs(self._gaze_x) > .05 or abs(self._gaze_y) > .05
+            or abs(self._tilt) > .05 or self._shake > .02)
+        interval = 16 if active else 120
+        if interval != self.timer.interval():
+            self.timer.setInterval(interval)
 
     def _scan_typing(self):
         """办公桌模式侦测主人击键。GetAsyncKeyState 低位=自上次查询后按下过,
@@ -373,6 +502,8 @@ class PetWidget(QWidget):
             if get(vk) & 0x0001:
                 self._paw = 2 if self._paw == 1 else 1  # 左右爪交替
                 self._paw_until = self._now + .22
+                self._last_interaction = self._now
+                self._wake("嗯,在干活!")
                 return
 
     def _typing(self):
@@ -387,9 +518,14 @@ class PetWidget(QWidget):
 
     def enterEvent(self, event):
         self._hover = True
-        self._hover_since = time.monotonic() - self._epoch
-        self._bubble_pop = self._hover_since
-        self.react("greet", self.revive_text)
+        now = time.monotonic() - self._epoch
+        self._last_interaction = now
+        self._hover_since = now
+        self._bubble_pop = now
+        if self.player.dozing:
+            self._wake()
+        else:
+            self.react("greet", self.revive_text)
         self.update()
 
     def leaveEvent(self, event):
@@ -560,7 +696,8 @@ class PetWidget(QWidget):
                         if t2 > .25:
                             lift = 2.0 + 1.2 * math.sin(t2 * 3)         # 定格微浮
             draw_rect = QRectF(rect)
-            draw_rect.translate(0, -(bounce + rock + lift))
+            # 光标跟踪: 整体朝光标方向偏几像素, 看起来在"转向你"
+            draw_rect.translate(self._gaze_x, self._gaze_y - (bounce + rock + lift))
             index = self.player.sample(self._now, self._hover, self._animate, self._desk,
                                        paw=self._paw if self._typing() else 0,
                                        dizzy=self._now < self._dizzy_until)
@@ -579,15 +716,15 @@ class PetWidget(QWidget):
             p.restore()
         else:
             p.setPen(QColor("#304a52"))
-            p.drawText(rect, Qt.AlignCenter, "TokenSpy\n桌宠素材未找到")
+            p.drawText(rect, Qt.AlignCenter, "Rockabuddy\n桌宠素材未找到")
         if self._desk and not desk_baked:
             self._draw_laptop(p, self._typing())
         if self._notes:
-            # 音符粒子: 从耳侧升起, 摇摆漂移, 2.2s 内上浮淡出; 强拍金色 ♫, 弱拍青色 ♪;
+            # 音符/Zzz 粒子: 从耳侧(或头顶)升起, 漂移淡出; 强拍金色 ♫, 弱拍青色 ♪, 打盹灰绿 Z;
             # 白描边垫底, 在深色衣服上也能看清
             alive = []
             for note in self._notes:
-                birth, x0, y0, drift, glyph, size = note
+                birth, x0, y0, drift, glyph, size, rise = note
                 age = self._now - birth
                 if age > 2.2 or age < 0:
                     continue
@@ -595,7 +732,7 @@ class PetWidget(QWidget):
                 pop = ease_out_back(min(1.0, age / .22))
                 x = x0 + drift * age + math.sin(age * 3.1 + birth * 7) * 6
                 # pop up 出场: 从下方 22px 弹上来(回弹过冲会略超再回落), 尺寸同步过冲
-                y = y0 - 34 * age + 22 * (1 - pop)
+                y = y0 - rise * age + 22 * (1 - pop)
                 alpha = min(1.0, age * 6) * max(0.0, 1 - (age / 2.2) ** 1.6)
                 px = max(6, round(size * pop))
                 area = QRectF(x - 40, y - 40, 80, 80)
@@ -606,7 +743,8 @@ class PetWidget(QWidget):
                 p.drawText(area, Qt.AlignCenter, glyph)
                 p.setFont(QFont("Microsoft YaHei UI", px, QFont.Bold))
                 p.setPen(QColor(232, 182, 76) if glyph == "♫"
-                         else QColor(95, 174, 159))
+                         else QColor(95, 174, 159) if glyph == "♪"
+                         else QColor(154, 168, 164))
                 p.drawText(area, Qt.AlignCenter, glyph)
                 p.restore()
             self._notes = alive
@@ -790,6 +928,9 @@ class PetWidget(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            self._last_interaction = self._now
+            if self.player.dozing:
+                self._wake()
             self._press = event.globalPosition().toPoint()
             self._drag_pos = self._press - self.pos()
             self._moved = False
@@ -821,6 +962,7 @@ class PetWidget(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self._drag_pos is not None:
+            self._last_interaction = self._now
             dizzy = self._moved and self._shake >= 3.0 and self._animate
             if not self._moved:
                 self.clicked.emit()
@@ -902,8 +1044,12 @@ class PetWidget(QWidget):
         desk.setCheckable(True)
         desk.setChecked(self._desk)
         desk.triggered.connect(self.toggle_desk)
+        autostart = menu.addAction("开机自启")
+        autostart.setCheckable(True)
+        autostart.setChecked(autostart_enabled())
+        autostart.triggered.connect(set_autostart)
         menu.addSeparator()
-        menu.addAction("退出 TokenSpy", QApplication.quit)
+        menu.addAction("退出 Rockabuddy", QApplication.quit)
         menu.exec(event.globalPos())
 
     def resize_pet(self, height):

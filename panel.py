@@ -6,10 +6,10 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (QWidget, QFrame, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QDialog, QLineEdit, QSizePolicy)
+import paths
 from credentials import save_secret
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ICON_DIR = os.path.join(BASE_DIR, "assets", "icons")
+ICON_DIR = paths.resource_path("assets", "icons")
 
 STYLE = """
 QWidget {font-family:'Microsoft YaHei UI';font-size:11px;color:#30474a;}

@@ -16,19 +16,40 @@ from PySide6.QtCore import Qt, QRect, QThread, QTimer, Signal, QObject
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 import providers as prov
+import paths
 from pet import PetWidget, ASSET
 
-ICON = os.path.join(os.path.dirname(ASSET), "icon.png")  # 大脸 app 图标(托盘/任务栏)
+ICON = paths.resource_path("assets", "icon.png")  # 大脸 app 图标(托盘/任务栏)
 from panel import Dashboard, ManualEditDialog
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
-HISTORY_PATH = os.path.join(BASE_DIR, "history.jsonl")
-CACHE_PATH = os.path.join(BASE_DIR, "usage-cache.json")
-SYNC_STATE_PATH = os.path.join(BASE_DIR, "sync-state.json")
+CONFIG_PATH = paths.data_path("config.json")
+HISTORY_PATH = paths.data_path("history.jsonl")
+CACHE_PATH = paths.data_path("usage-cache.json")
+SYNC_STATE_PATH = paths.data_path("sync-state.json")
 FONT = "Microsoft YaHei UI"
 RESET_GRACE = 20          # 窗口到期后宽限几秒再拉取
 QUIT_SYNC_BUDGET = 6.0    # 退出同步总预算(秒)
+
+
+def load_env(path):
+    """本地 .env(KEY=VALUE)注入进程环境, 已存在的环境变量优先。
+    密钥只存本地: .env / Windows 凭据管理器, 绝不入库。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        pass
+
+
+load_env(paths.data_path(".env"))
 
 
 def single_instance_lock():
@@ -40,8 +61,14 @@ def single_instance_lock():
     return ctypes.windll.kernel32.GetLastError() != 183   # ERROR_ALREADY_EXISTS
 
 def load_config():
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        default = {"refresh_minutes": 2, "heartbeat_minutes": 30,
+                   "sync_only_active": True, "providers": []}
+        save_config(default)
+        return default
 
 
 def save_config(cfg):

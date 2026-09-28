@@ -2,9 +2,11 @@
 
 - WASAPI loopback 直接拿系统输出, 不需要麦克风权限;
 - 跟随"最响"的渲染设备: 换耳机/换输出后 2s 内自动切换, 不挂在静音设备上;
-- 能量包络 onset 检测: 自适应阈值(局部均值×1.35) + 220ms 不应期;
-- BPM 用 onset 间隔中位数连续估计, 半速纠正, 不钉死档位;
-- 输出两类事件: onset(强度, 拍长秒) / quiet(静默超过 2s)。
+- 双频段包络: 低频段(~150Hz)近似鼓点给重拍加权, 全频段慢包络做语音活动检测;
+- onset 拾取: 局部极大 + 自适应阈值(局部均值×1.4) + 180ms 不应期;
+- 节拍网格(PLL): 预测拍点 ±18% 内的 onset 修正相位(30%)并更新拍长中位数,
+  连续 3 拍脱网才重置 —— 切分音不带歪节奏, 长时间跟拍不漂移;
+- 输出三类事件: onset(强度, 拍长秒) / voice(在出声?, 快慢响度) / quiet(静默超 2s)。
 """
 import ctypes
 import math
@@ -287,55 +289,132 @@ class LoopbackCapture:
 
 
 class BeatDetector:
-    """能量包络 onset 检测 + 连续 BPM 估计(可测, 与采集解耦)。"""
+    """双频段能量包络 + 自适应峰值拾取 + 节拍相位锁(PLL)。
+
+    - 低频段(~150Hz 以下, 单极点低通)近似鼓点: 重拍强度按低频占比加权,
+      甩头只认真鼓;
+    - 全频段慢包络当作"在出声"的语音活动检测: 有声跟唱, 无声闭嘴待机;
+    - onset 拾取: 局部极大(最近两跳) + 自适应阈值(局部均值×1.4) + 0.18s 不应期;
+    - 节拍网格(PLL): 落在预测拍点 ±18% 内的 onset 参与相位修正(30%)
+      与拍长中位数更新; 连续 3 拍脱网才重置网格 —— 乐句里的切分音不会带歪节奏,
+      长时间跟拍不漂移。
+    """
 
     def __init__(self):
-        self.energy = deque(maxlen=100)   # 最近 ~1s 的 10ms hop 能量
+        self.energy = deque(maxlen=100)     # 最近 ~1s 的 10ms hop 全频能量
+        self.low_energy = deque(maxlen=100)
         self.onsets = deque(maxlen=16)
+        self.matched = deque(maxlen=12)     # 命中网格的拍点时刻
         self.last_onset = 0.0
         self.active = False
-        self.floor = 3e-3                 # 静音底噪(float32 满幅 1.0)
+        self.floor = 3e-3                   # 静音底噪(float32 满幅 1.0)
+        self._lp_low = 0.0                  # 低通状态(鼓点段)
+        self.slow_e = 0.0                   # 全频慢包络(语音活动基线)
+        self.voice_active = False
+        self._voice_last = -10.0
+        self._last_voice_emit = 0.0
+        self.anchor = None                  # 节拍网格相位锚点
+        self.period = 0.0                   # 网格拍长(秒), 0=未知
+        self._miss = 0                      # 连续脱网拍数
 
     def feed(self, samples, now):
         if not samples:
             return []
         level = max(abs(s) for s in samples)
-        if level > 1.5:                   # int16 原始值, 归一化
+        if level > 1.5:                     # int16 原始值, 归一化
             samples = [s / 32768.0 for s in samples]
         e = math.sqrt(sum(s * s for s in samples) / len(samples))
+        low_sq = 0.0
+        for s in samples:
+            self._lp_low += .02 * (s - self._lp_low)   # 48kHz 下截止 ~150Hz
+            low_sq += self._lp_low * self._lp_low
+        low = math.sqrt(low_sq / len(samples))
         events = []
+
+        # 语音活动: 有声跟唱/无声闭嘴(350ms 滞回)
+        self.slow_e += .10 * (e - self.slow_e)
+        if e > max(self.floor * .8, self.slow_e * 1.55 + 2e-4):
+            self._voice_last = now
+        voicing = now - self._voice_last < .35
+        if voicing != self.voice_active or (voicing and now - self._last_voice_emit > .25):
+            self.voice_active = voicing
+            self._last_voice_emit = now
+            events.append(("voice", voicing, round(e, 5), round(self.slow_e, 5)))
+
+        # onset: 局部极大 + 自适应阈值 + 不应期
         if len(self.energy) >= 20:
             avg = statistics.fmean(self.energy)
-            threshold = max(self.floor, avg * 1.35)
+            threshold = max(self.floor, avg * 1.4)
+            local_max = e >= self.energy[-1] and (len(self.energy) < 2
+                                                  or e >= self.energy[-2])
             ioi = now - self.last_onset
-            if e > threshold and e > self.floor and ioi > 0.22:
-                strength = min(1.0, (e / threshold - 1) / 1.2)
+            if e > threshold and e > self.floor and local_max and ioi > 0.18:
+                share = low / (e + 1e-6)    # 低频占比: 鼓点越重甩得越狠
+                strength = min(1.0, (e / threshold - 1) / 1.2) \
+                    * (0.6 + 1.2 * min(1.0, share * 1.4))
                 self.onsets.append(now)
                 self.last_onset = now
                 self.active = True
-                events.append(("onset", round(strength, 3), self.period()))
+                self._track_grid(now)
+                events.append(("onset", round(strength, 3), round(self.period, 4)))
         self.energy.append(e)
+        self.low_energy.append(low)
         if self.active and now - self.last_onset > 2.0:
             self.active = False
             events.append(("quiet",))
         return events
 
-    def period(self):
-        """连续 BPM 拍长(秒); 样本不足返回 0。"""
+    def _track_grid(self, t):
+        """PLL: 命中预测拍点则修正相位并更新拍长; 连续脱网 3 拍重置。"""
+        if self.period > 0 and self.anchor is not None:
+            k = round((t - self.anchor) / self.period)
+            if k >= 1:
+                predicted = self.anchor + k * self.period
+                err = t - predicted
+                if abs(err) <= .15 * self.period:
+                    self.anchor = predicted + .3 * err
+                    self.matched.append(t)
+                    if len(self.matched) >= 4:
+                        matched = list(self.matched)
+                        iois = [b - a for a, b in zip(matched, matched[1:])
+                                if 0.24 <= b - a <= 2.0]
+                        if iois:
+                            self.period = self._fold(statistics.median(iois))
+                    self._miss = 0
+                    return
+            self._miss += 1
+            if self._miss >= 3:
+                self._reset_grid(t)
+            return
+        self._reset_grid(t)
+
+    def _reset_grid(self, t):
+        self.anchor = t
+        self._miss = 0
+        self.matched.clear()
+        self.period = self._fold(self.estimate_period()) or 0.0
+
+    @staticmethod
+    def _fold(p):
+        """半速纠正: 检出密拍通常是双倍速。"""
+        while 0 < p < .30:
+            p *= 2
+        return p
+
+    def estimate_period(self):
+        """onset 间隔中位数的拍长估计(网格未建立时的兜底); 样本不足返回 0。"""
         if len(self.onsets) < 4:
             return 0.0
         ticks = list(self.onsets)
         iois = [b - a for a, b in zip(ticks, ticks[1:]) if 0.24 <= b - a <= 2.0]
         if not iois:
             return 0.0
-        p = statistics.median(iois)
-        while p < 0.30:      # 半速纠正: 检出密拍通常是双倍速
-            p *= 2
-        return p
+        return self._fold(statistics.median(iois))
 
 
 class BeatListener(QThread):
-    onset = Signal(float, float)   # 强度 0-1, 拍长秒(未知为 0)
+    onset = Signal(float, float)          # 强度 0-1(低频占比加权), 拍长秒(未知为 0)
+    voice = Signal(bool, float, float)    # 在出声?, 快响度, 慢响度(跟唱/美声用)
     quiet = Signal()
 
     def __init__(self, parent=None):
@@ -358,6 +437,8 @@ class BeatListener(QThread):
         for event in self.detector.feed(samples, now):
             if event[0] == "onset":
                 self.onset.emit(event[1], event[2])
+            elif event[0] == "voice":
+                self.voice.emit(event[1], event[2], event[3])
             else:
                 self.quiet.emit()
 

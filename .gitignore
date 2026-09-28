@@ -4,6 +4,11 @@ usage-cache.json
 sync-state.json
 config.json
 
+# 密钥与敏感信息: 只存本地(.env / Windows 凭据管理器), 绝不入库
+.env
+*.env
+secrets.json
+
 # 个人配置文件
 .workbuddy/
 NVIDIA Corporation/
@@ -16,6 +21,10 @@ __pycache__/
 *.pyc
 work/
 preview_dashboard.png
+
+# 打包产物(exe 走 GitHub Release, 不进仓库)
+build/
+dist/
 
 # 启动器(指向本机 Python 路径, 每台机器不同)
 start_tokenspy.vbs

@@ -60,6 +60,9 @@ class SpritePlayer:
         self.rocking = False     # 音乐节拍摇摆中(循环 ROCK_CYCLE)
         self.rock_period = 0.5   # 拍长秒, 由 BeatListener 连续更新
         self.rock_anchor = 0.0   # 循环相位起点
+        self.rock_cap = 3        # 摇摆帧档位上限(节拍器只轻点 0-1 档)
+        self.talking = False     # 跟唱说话: 有声张嘴帧交替, 无声闭嘴待机
+        self.opera = False       # 美声跟唱: 眯眼笑帧, 摇摆在 pet 侧按乐句缓动
 
     def set_character(self, character):
         """切换角色(owl/sunflower), 重载图集并重置播放状态。"""
@@ -70,6 +73,8 @@ class SpritePlayer:
         self.clip = "idle"
         self.hold_frame = None
         self.rocking = False
+        self.talking = False
+        self.opera = False
         self.dozing = False
         self._fade_from = None
         self._fade_strength = 1.0
@@ -202,6 +207,14 @@ class SpritePlayer:
             index = self.hold_frame % len(self.frames) if self.frames else self.hold_frame
             self._set(index, now)
             return index
+        if self.opera:
+            # 美声跟唱: 眯眼笑的表情定住, 摇摆由 pet 侧按乐句缓动
+            self._set(5, now)
+            return self.frame_index
+        if self.talking:
+            # 汤姆猫式跟唱: 笑/闭嘴帧快速交替当"张嘴", 无声时 pet 侧已关掉
+            self._set(4 if int(now / .14) % 2 == 0 else 0, now)
+            return self.frame_index
         if self.rocking and not desk and len(self.frames) > 40:
             # 音乐节拍摇摆: 相位走正弦——两极(倾角最深)S 缓动停留, 过中线快,
             # 单摆式来回, 最深点正好压在拍点上; 期间不眨眼
@@ -220,7 +233,7 @@ class SpritePlayer:
             else:
                 level = 3
             if a >= .28:
-                index = (ROCK_L if s < 0 else ROCK_R)[level]
+                index = (ROCK_L if s < 0 else ROCK_R)[min(level, self.rock_cap)]
             self._set(index, now)
             return index
         if self.dozing:

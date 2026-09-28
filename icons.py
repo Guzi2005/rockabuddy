@@ -8,11 +8,11 @@ import ctypes
 import ctypes.wintypes as wt
 import json
 import os
+import paths
 import subprocess
 import sys
 
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "assets", "icons", "apps")
+CACHE_DIR = paths.data_path("assets", "icons", "apps")
 
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32

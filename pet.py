@@ -4,16 +4,31 @@ import math
 import os
 import random
 import time
+import paths
 from animation import SpritePlayer, SUNFLOWER_HOLD_FRAME, SUNFLOWER_PALM, SUNFLOWER_LIFT_SECONDS
 
 from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QSettings, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QFont, QFontMetrics,
+                           QImage, QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
-ASSET = os.path.join(os.path.dirname(__file__), "assets", "companion.png")
+ASSET = paths.resource_path("assets", "companion.png")
 DESK_FIT = 0.89  # 办公桌帧构图偏大, 按头发宽度对齐站立体型(133px/150px)
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "Rockabuddy"
+
+# 听音乐模式(延续向日葵节拍器的划分):
+# off        安静待命, 不采音
+# metronome  节拍器: 相位锁定的预测拍点正中轻轻点头, 摆幅限制在最轻两档
+# rock       摇滚甩头: 全档摇摆帧, 低频重拍(鼓点)触发左右交替甩头冲量
+# opera      美声跟唱: 眯眼笑帧, 身体以乐句(约两拍)为单位长音缓动, 幅度随响度呼吸
+# singalong  跟唱说话: 检测到音频就"张嘴"跟唱, 无声立刻闭嘴待机(师范向日葵方案)
+MUSIC_MODES = ("off", "metronome", "rock", "opera", "singalong")
+MUSIC_MENU = {"off": "关闭",
+              "metronome": "节拍器 · 卡点点头",
+              "rock": "摇滚甩头 · 重拍甩头",
+              "opera": "美声跟唱 · 长音缓动",
+              "singalong": "跟唱说话 · 有声才动"}
 
 
 def autostart_enabled():
@@ -37,11 +52,16 @@ def set_autostart(enable):
             except FileNotFoundError:
                 pass
             return
-        exe = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-        if not os.path.isfile(exe):
-            exe = sys.executable
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
-        winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, '"%s" "%s"' % (exe, script))
+        if getattr(sys, "frozen", False):
+            # 打包版: 自启指向 exe 本身
+            cmd = '"%s"' % sys.executable
+        else:
+            exe = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            if not os.path.isfile(exe):
+                exe = sys.executable
+            script = os.path.join(paths.DATA_DIR, "app.py")
+            cmd = '"%s" "%s"' % (exe, script)
+        winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, cmd)
 
 
 def ease_out_back(t):
@@ -108,13 +128,22 @@ class PetWidget(QWidget):
         self._last_drag = None      # (x, 时刻)
         self._last_vx = 0.0
         self._dizzy_until = -10.0
-        # 跟音乐摇摆: 节拍脉冲驱动的 rock 状态
-        self._rock = self.settings.value("rock", True, type=bool)
+        # 听音乐模式: 旧版 rock 布尔设置迁移为模式名
+        legacy_rock = self.settings.value("rock", True, type=bool)
+        self._music_mode = self.settings.value("music_mode", "", type=str)
+        if self._music_mode not in MUSIC_MODES:
+            self._music_mode = "rock" if legacy_rock else "off"
         self._music_on = False
         self._beat_at = -10.0
         self._beat_strength = 0.0
         self._beat_period = 0.0
         self._beat_dir = 1
+        # 语音活动(跟唱/美声): 快/慢响度包络, 由 BeatListener.voice 更新
+        self._voice_level = 0.0
+        self._voice_slow = 0.0
+        self._voice_at = -10.0
+        self._opera_anchor = 0.0
+        self._opera_side = 1
         self._notes = []           # 音符粒子: [birth, x0, y0, drift, glyph, size]
         self._last_note = -10.0
         self._listener = None
@@ -139,7 +168,7 @@ class PetWidget(QWidget):
         self.timer.timeout.connect(self._tick)
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.start(16)
-        if self._rock:
+        if self._music_mode != "off":
             self._start_listener()
         if self._watch_apps:
             self._start_watcher()
@@ -278,6 +307,7 @@ class PetWidget(QWidget):
         from music import BeatListener
         self._listener = BeatListener(self)
         self._listener.onset.connect(self._on_beat)
+        self._listener.voice.connect(self._on_voice)
         self._listener.quiet.connect(self._on_quiet)
         self._listener.start()
 
@@ -287,26 +317,34 @@ class PetWidget(QWidget):
             self._listener = None
         self._music_on = False
         self.player.rocking = False
+        self.player.talking = False
+        self.player.opera = False
 
     def _on_beat(self, strength, period):
         now = time.monotonic() - self._epoch
-        self._beat_at = now
         self._beat_strength = strength
         self._beat_dir *= -1            # 左右交替摇摆
         self._music_on = True
-        self._last_interaction = now
         if self.player.dozing:          # 音乐响起自然醒, 不出声
             self.player.dozing = False
             self._doze_until = -10.0
         if period > 0:
             self._beat_period = period
-        if self._animate and self._rock and self._drag_pos is None:
+        mode = self._music_mode
+        if mode in ("rock", "metronome") and self._animate and self._drag_pos is None:
             # 摇摆用视频抽帧循环(正弦相位); 锚点提前半拍, 正弦极值=倾角最深正好卡在拍点
             if not self.player.rocking:
                 self.player.rocking = True
                 self.player.rock_anchor = now - (period if period > 0 else .5) / 2
             if period > 0:
                 self.player.rock_period = period
+            self.player.rock_cap = 1 if mode == "metronome" else 3
+            self._beat_at = now
+            if mode == "rock" and strength >= .65:
+                # 摇滚甩头: 低频重拍(鼓)给一次左右交替的甩头冲量, 拍间自行衰减
+                self._target_tilt = 9.0 * self._beat_dir
+        else:
+            self._beat_at = now
         # 节拍催生音符: 从耳侧升起, 左右交替, 强拍更大
         if now - self._last_note > .22 and len(self._notes) < 8:
             self._last_note = now
@@ -320,19 +358,41 @@ class PetWidget(QWidget):
                 38 + round(18 * strength),
                 34.0])
 
+    def _on_voice(self, active, fast, slow):
+        """语音活动: 跟唱说话模式驱动张嘴帧; 美声模式记录响度做长音缓动。"""
+        self._voice_level = fast
+        self._voice_slow = slow
+        self._voice_at = time.monotonic() - self._epoch
+        if self._music_mode == "singalong":
+            self.player.talking = active
+        elif self._music_mode == "opera":
+            if active and not self.player.opera:
+                self._opera_anchor = self._now
+                self._opera_side *= -1      # 每个乐句换一边缓动
+            self.player.opera = active
+
     def _on_quiet(self):
         self._music_on = False
         self.player.rocking = False
+        self.player.talking = False         # 无声立刻闭嘴待机
+        self.player.opera = False
         if self._drag_pos is None:
             self._target_tilt = 0.0
 
-    def toggle_rock(self, enabled):
-        self._rock = enabled
-        self.settings.setValue("rock", enabled)
-        if enabled:
-            self._start_listener()
-        else:
+    def set_music_mode(self, mode):
+        if mode not in MUSIC_MODES:
+            return
+        self._music_mode = mode
+        self.settings.setValue("music_mode", mode)
+        self.player.rocking = False
+        self.player.talking = False
+        self.player.opera = False
+        if mode == "off":
             self._stop_listener()
+            self.react("pet", "好，安静待命")
+        else:
+            self._start_listener()
+            self.react("pet", "%s，开唱！" % MUSIC_MENU[mode].split(" ·")[0])
 
     def closeEvent(self, event):
         self._stop_listener()
@@ -406,6 +466,16 @@ class PetWidget(QWidget):
                 decay = (self._dizzy_until - self._now) / 2.8
                 self._target_tilt = math.sin(self._now * 9.5) * 7 * decay
             self._track_cursor(delta)
+            if self._animate and self._drag_pos is None and self._now >= self._dizzy_until:
+                if self._music_mode == "opera":
+                    # 美声跟唱: 以乐句(约两拍)为单位的正弦缓动, 幅度随人声响度呼吸
+                    amp = max(0.0, min(1.0, self._voice_slow * 6.0))
+                    half = max(1.2, self._beat_period * 2.0)
+                    glide = math.sin(math.pi * min(1.0, (self._now - self._opera_anchor) / half))
+                    self._target_tilt = 10.0 * amp * glide * self._opera_side
+                elif self._music_mode == "rock" and self.player.rocking:
+                    # 甩头冲量拍间自然回落, 不然一直歪着
+                    self._target_tilt *= math.exp(-1.4 * delta)
             self._idle_quirks()
             if self._doze_until > self._now and self._animate:
                 self._doze_zzz()
@@ -427,7 +497,7 @@ class PetWidget(QWidget):
         ease = 1 - math.exp(-9 * delta)
         self._gaze_x += ((gx * 3.0 if near else 0.0) - self._gaze_x) * ease
         self._gaze_y += ((gy * 2.2 if near else 0.0) - self._gaze_y) * ease
-        if not self.player.rocking:
+        if not self.player.rocking and not self.player.opera:
             if near and not self.player.dozing:
                 self._target_tilt = max(-4.0, min(4.0, gx * 4.0))
             else:
@@ -631,17 +701,29 @@ class PetWidget(QWidget):
         p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         elapsed = self._now - self._bounce_at
         bounce = math.sin(elapsed * 18) * math.exp(-elapsed * 5) * 10 if 0 <= elapsed < 1.2 and self._animate else 0
-        # 节拍下沉: 高斯脉冲卡在拍点(= 摇摆倾角最深)落到底, 拍前 150ms 微提预备
+        # 节拍下沉: 节拍器用相位锁定的预测拍点(无状态高斯, 不受 onset 延迟抖动);
+        # 摇滚/默认沿用 onset 触发的高斯脉冲, 拍前 150ms 微提预备
         rock = 0.0
         if self._animate and self._music_on:
-            since_beat = self._now - self._beat_at
-            if since_beat >= 0:
-                dip = math.exp(-((since_beat / .09) ** 2))
-                rock -= (2.0 + 4.0 * self._beat_strength) * dip
-                if self._beat_period > 0:
-                    to_next = self._beat_at + self._beat_period - self._now
-                    if 0 < to_next < .15:
-                        rock += 1.6 * self._beat_strength * (1 - to_next / .15)
+            if (self._music_mode == "metronome" and self.player.rocking
+                    and self.player.rock_period > 0):
+                period = self.player.rock_period
+                phase = ((self._now - self.player.rock_anchor) / period) % 1.0
+                dist = min(phase, 1.0 - phase) * period      # 距最近预测拍点
+                rock -= (1.1 + 2.0 * min(1.0, self._beat_strength)) \
+                    * math.exp(-((dist / .05) ** 2))
+            else:
+                since_beat = self._now - self._beat_at
+                if since_beat >= 0:
+                    dip = math.exp(-((since_beat / .09) ** 2))
+                    rock -= (2.0 + 4.0 * self._beat_strength) * dip
+                    if self._beat_period > 0:
+                        to_next = self._beat_at + self._beat_period - self._now
+                        if 0 < to_next < .15:
+                            rock += 1.6 * self._beat_strength * (1 - to_next / .15)
+        # 跟唱说话: 张嘴帧交替时身体随语声小幅颠动
+        bob = math.sin(self._now * 12.6) * 1.3 \
+            if (self._animate and self.player.talking) else 0.0
         # 精灵脚底贴窗口底边(留 4px), 不做 idle 上下浮动, 站着就有落地感;
         # 办公桌模式用带笔记本的整帧时, 排版区收缩到窗口高度且底边齐平,
         # 笔记本底座直接坐在底栏上(底栏=桌面)
@@ -696,8 +778,9 @@ class PetWidget(QWidget):
                         if t2 > .25:
                             lift = 2.0 + 1.2 * math.sin(t2 * 3)         # 定格微浮
             draw_rect = QRectF(rect)
-            # 光标跟踪: 整体朝光标方向偏几像素, 看起来在"转向你"
-            draw_rect.translate(self._gaze_x, self._gaze_y - (bounce + rock + lift))
+            # 光标跟踪: 整体朝光标方向偏几像素, 看起来在"转向你"; 跟唱时叠加颠动
+            draw_rect.translate(self._gaze_x,
+                                self._gaze_y - (bounce + rock + lift) + bob)
             index = self.player.sample(self._now, self._hover, self._animate, self._desk,
                                        paw=self._paw if self._typing() else 0,
                                        dizzy=self._now < self._dizzy_until)
@@ -1031,10 +1114,16 @@ class PetWidget(QWidget):
         motion.setCheckable(True)
         motion.setChecked(self._animate)
         motion.triggered.connect(self.toggle_motion)
-        rock = menu.addAction("跟着音乐摇摆")
-        rock.setCheckable(True)
-        rock.setChecked(self._rock)
-        rock.triggered.connect(self.toggle_rock)
+        music_menu = menu.addMenu("听音乐模式")
+        music_group = QActionGroup(music_menu)
+        music_group.setExclusive(True)
+        for mode in MUSIC_MODES:
+            act = QAction(MUSIC_MENU[mode], music_menu)
+            act.setCheckable(True)
+            act.setChecked(self._music_mode == mode)
+            music_group.addAction(act)
+            act.triggered.connect(lambda _checked, m=mode: self.set_music_mode(m))
+            music_menu.addAction(act)
         watch = menu.addAction("新应用启动提醒(举图标)")
         watch.setCheckable(True)
         watch.setChecked(self._watch_apps)

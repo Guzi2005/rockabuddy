@@ -274,6 +274,9 @@ class App(QObject):
         self.pet.refresh_requested.connect(self.refresh_all)
         self.board.refresh_requested.connect(self.refresh_all)
         self.board.manual_edited.connect(self.on_manual_edit)
+        self.pet.moved.connect(self.on_pet_moved)
+        self.pet.glass_changed.connect(self.board.apply_glass)
+        self.board.apply_glass(self.pet.panel_glass)
 
         self.timer = QTimer()           # 调度器: 每 15 秒检查一次谁到期
         self.timer.timeout.connect(self.schedule_tick)
@@ -305,35 +308,13 @@ class App(QObject):
         if self.board.isVisible():
             self.board.hide()
             return
-        pet = self.pet.frameGeometry()
-        scr = (QApplication.screenAt(pet.center()) or QApplication.primaryScreen()).availableGeometry()
-        bw, bh, gap = self.board.width(), self.board.height(), 10
-        # 候选方位: 优先左/右侧贴边, 其次上/下; 钳进屏幕且不遮桌宠
-        candidates = [
-            (pet.left() - gap - bw, pet.center().y() - bh // 2),   # 左
-            (pet.right() + gap, pet.center().y() - bh // 2),       # 右
-            (pet.center().x() - bw // 2, pet.top() - gap - bh),    # 上
-            (pet.center().x() - bw // 2, pet.bottom() + gap),      # 下
-        ]
-        best = None
-        for cx, cy in candidates:
-            x = min(max(scr.left(), cx), scr.right() - bw + 1)
-            y = min(max(scr.top(), cy), scr.bottom() - bh + 1)
-            rect = QRect(x, y, bw, bh)
-            inter = rect.intersected(pet)
-            overlap = inter.width() * inter.height()
-            fits = scr.contains(rect)
-            if fits and overlap == 0:
-                best = rect
-                break
-            score = (0 if fits else 1, overlap)
-            if best is None or score < best[0]:
-                best = (score, rect)
-        if not isinstance(best, QRect):
-            best = best[1]
-        self.board.move(best.topLeft())
+        self.board.reposition_for(self.pet)
         self.board.show()
         self.board.raise_()
+
+    def on_pet_moved(self):
+        if self.board.isVisible():
+            self.board.reposition_for(self.pet)
 
     def refresh_all(self):
         """手动刷新: 始终同步全部服务。"""

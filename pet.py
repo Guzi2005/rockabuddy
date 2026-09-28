@@ -10,7 +10,8 @@ from animation import SpritePlayer, SUNFLOWER_HOLD_FRAME, SUNFLOWER_PALM, SUNFLO
 from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QSettings, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QFont, QFontMetrics,
                            QImage, QPainter, QPainterPath, QPen, QPixmap)
-from PySide6.QtWidgets import QApplication, QMenu, QWidget
+from PySide6.QtWidgets import (QApplication, QMenu, QWidget,
+                               QGraphicsDropShadowEffect)
 
 ASSET = paths.resource_path("assets", "companion.png")
 DESK_FIT = 0.89  # 办公桌帧构图偏大, 按头发宽度对齐站立体型(133px/150px)
@@ -29,6 +30,40 @@ MUSIC_MENU = {"off": "关闭",
               "rock": "摇滚甩头 · 重拍甩头",
               "opera": "美声跟唱 · 长音缓动",
               "singalong": "跟唱说话 · 有声才动"}
+
+# 右键菜单: 纸质吊牌质感, 圆角行 + 互斥圆点/方形开关指示
+MENU_STYLE = """
+QMenu {
+  background: rgba(244,244,240,252);
+  border: 1px solid #d9dcd2;
+  border-radius: 12px;
+  padding: 6px;
+}
+QMenu::item { padding: 6px 22px 6px 8px; border-radius: 8px; }
+QMenu::item:selected { background: #dcebe6; }
+QMenu::item:disabled { color: #98a09a; }
+QMenu::separator { height: 1px; background: #e2e5dc; margin: 5px 10px; }
+QMenu::indicator:exclusive:unchecked {
+  width: 13px; height: 13px;
+  border: 1.5px solid #b9bfc0; border-radius: 7px; background: white;
+  margin-left: 2px;
+}
+QMenu::indicator:exclusive:checked {
+  width: 13px; height: 13px;
+  border: 4px solid #f4f4f0; border-radius: 7px; background: #5fae9f;
+  margin-left: 2px;
+}
+QMenu::indicator:non-exclusive:unchecked {
+  width: 13px; height: 13px;
+  border: 1.5px solid #b9bfc0; border-radius: 4px; background: white;
+  margin-left: 2px;
+}
+QMenu::indicator:non-exclusive:checked {
+  width: 13px; height: 13px;
+  border: 1.5px solid #5fae9f; border-radius: 4px; background: #5fae9f;
+  margin-left: 2px;
+}
+"""
 
 
 def autostart_enabled():
@@ -72,6 +107,8 @@ def ease_out_back(t):
 class PetWidget(QWidget):
     clicked = Signal()
     refresh_requested = Signal()
+    moved = Signal()               # 拖动结束, 面板据此让位
+    glass_changed = Signal(int)    # 看板毛玻璃透明度调整
 
     def __init__(self):
         super().__init__()
@@ -149,6 +186,7 @@ class PetWidget(QWidget):
         self._listener = None
         self._animate = self.settings.value("animate", True, type=bool)
         self._desk = self.settings.value("desk", False, type=bool)
+        self._panel_glass = self.settings.value("panel_glass", 0, type=int)
         # 光标跟踪: 身体朝光标方向的微小偏移(px)
         self._gaze_x = 0.0
         self._gaze_y = 0.0
@@ -1064,8 +1102,19 @@ class PetWidget(QWidget):
             self.clamp_position()
             if self._moved:
                 self._maybe_snap_desk()  # 松手时贴近底栏则吸附, 远离则切回
+                self.moved.emit()
             self.settings.setValue("position", self.pos())
             self.setCursor(Qt.PointingHandCursor)
+
+    @property
+    def panel_glass(self):
+        return self._panel_glass
+
+    def set_panel_glass(self, transparency):
+        """看板毛玻璃透明度(0=不透明), 持久化并通知面板。"""
+        self._panel_glass = max(0, min(90, int(transparency)))
+        self.settings.setValue("panel_glass", self._panel_glass)
+        self.glass_changed.emit(self._panel_glass)
 
     def _grow_top(self, extra):
         """叠叠乐塔顶要长出窗口: 向上加高窗口(她钉在底部不动), 给塔身无限空间。"""
@@ -1086,9 +1135,13 @@ class PetWidget(QWidget):
         self.setFixedSize(self.width(), h)
         self.move(self.x(), y)
 
-    def switch_character(self):
-        """右键切换角色: 猫头鹰娘 <-> 向日葵(听歌陪伴)。"""
-        self.character = "sunflower" if self.character == "owl" else "owl"
+    def switch_character(self, target=None):
+        """切换角色: 不带参则在奥尔(猫头鹰娘)和向日葵之间轮换, 菜单传指定目标。"""
+        if target is None:
+            target = "sunflower" if self.character == "owl" else "owl"
+        if target not in ("owl", "sunflower") or target == self.character:
+            return
+        self.character = target
         self.settings.setValue("character", self.character)
         self.settings.sync()
         if self.character != "owl" and self._desk:
@@ -1098,47 +1151,92 @@ class PetWidget(QWidget):
         self.player.set_character(self.character)
         self.set_size(self.settings.value("height", 210, type=int))
         self.clamp_position()
-        self.react("pet", "我是%s啦" % ("向日葵" if self.character == "sunflower" else "猫头鹰娘"))
+        self.react("pet", "我是%s啦" % ("向日葵" if self.character == "sunflower" else "奥尔"))
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
-        menu.addAction("打开 / 收起看板", self.clicked.emit)
-        menu.addAction("立即刷新", self.refresh_requested.emit)
-        menu.addAction("摸摸头", lambda: self.react("pet", self.revive_text))
-        menu.addAction("打个招呼", lambda: self.react("greet", self.revive_text))
-        menu.addAction("切换角色（猫头鹰娘 / 向日葵）", self.switch_character)
-        sizes = menu.addMenu("桌宠大小")
-        for label, height in [("小 · 180", 180), ("中 · 240", 240), ("大 · 320", 320)]:
-            sizes.addAction(label, lambda h=height: self.resize_pet(h))
-        motion = menu.addAction("动画与互动动作")
-        motion.setCheckable(True)
-        motion.setChecked(self._animate)
-        motion.triggered.connect(self.toggle_motion)
-        music_menu = menu.addMenu("听音乐模式")
-        music_group = QActionGroup(music_menu)
+        menu.setAttribute(Qt.WA_TranslucentBackground)
+        menu.setStyleSheet(MENU_STYLE)
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(18, 27, 29, 90))
+        menu.setGraphicsEffect(shadow)
+
+        open_act = menu.addAction("📊  打开 / 收起看板")
+        open_act.triggered.connect(self.clicked.emit)
+        refresh_act = menu.addAction("🔄  立即刷新")
+        refresh_act.triggered.connect(self.refresh_requested.emit)
+
+        fun = menu.addMenu("🐾  互动")
+        fun.addAction("✋  摸摸头", lambda: self.react("pet", self.revive_text))
+        fun.addAction("👋  打个招呼", lambda: self.react("greet", self.revive_text))
+        fun.addAction("🍱  快端上来罢（启动记录）", self.show_trophy)
+        desk = fun.addAction("💻  底栏办公桌模式")
+        desk.setCheckable(True)
+        desk.setChecked(self._desk)
+        desk.triggered.connect(self.toggle_desk)
+
+        music = menu.addMenu("🎵  听音乐模式")
+        music_group = QActionGroup(music)
         music_group.setExclusive(True)
         for mode in MUSIC_MODES:
-            act = QAction(MUSIC_MENU[mode], music_menu)
+            act = QAction(MUSIC_MENU[mode], music)
             act.setCheckable(True)
             act.setChecked(self._music_mode == mode)
             music_group.addAction(act)
             act.triggered.connect(lambda _checked, m=mode: self.set_music_mode(m))
-            music_menu.addAction(act)
-        watch = menu.addAction("新应用启动提醒(举图标)")
+            music.addAction(act)
+
+        cfg = menu.addMenu("⚙️  设置")
+        motion = cfg.addAction("✨  动画与互动动作")
+        motion.setCheckable(True)
+        motion.setChecked(self._animate)
+        motion.triggered.connect(self.toggle_motion)
+        watch = cfg.addAction("🚀  新应用启动提醒")
         watch.setCheckable(True)
         watch.setChecked(self._watch_apps)
         watch.triggered.connect(self.toggle_watch_apps)
-        menu.addAction("快端上来罢（捧出启动记录）", self.show_trophy)
-        desk = menu.addAction("底栏办公桌模式")
-        desk.setCheckable(True)
-        desk.setChecked(self._desk)
-        desk.triggered.connect(self.toggle_desk)
-        autostart = menu.addAction("开机自启")
+        autostart = cfg.addAction("🔌  开机自启")
         autostart.setCheckable(True)
         autostart.setChecked(autostart_enabled())
         autostart.triggered.connect(set_autostart)
+        size = cfg.addMenu("📐  桌宠大小")
+        size_group = QActionGroup(size)
+        size_group.setExclusive(True)
+        current_h = self.settings.value("height", 210, type=int)
+        for text, height in (("小 · 180", 180), ("中 · 240", 240), ("大 · 320", 320)):
+            act = QAction(text, size)
+            act.setCheckable(True)
+            act.setChecked(abs(current_h - height) < 30)
+            size_group.addAction(act)
+            act.triggered.connect(lambda _checked, h=height: self.resize_pet(h))
+            size.addAction(act)
+        glass = cfg.addMenu("🧊  看板毛玻璃")
+        glass_group = QActionGroup(glass)
+        glass_group.setExclusive(True)
+        for value, text in ((0, "不透明"), (25, "25% 透明"), (45, "45% 透明"),
+                            (65, "65% 透明"), (85, "85% 透明")):
+            act = QAction(text, glass)
+            act.setCheckable(True)
+            act.setChecked(self._panel_glass == value)
+            glass_group.addAction(act)
+            act.triggered.connect(lambda _checked, v=value: self.set_panel_glass(v))
+            glass.addAction(act)
+        role = cfg.addMenu("🎭  角色")
+        role_group = QActionGroup(role)
+        role_group.setExclusive(True)
+        for cid, text in (("owl", "奥尔 · 猫头鹰娘"), ("sunflower", "向日葵")):
+            act = QAction(text, role)
+            act.setCheckable(True)
+            act.setChecked(self.character == cid)
+            role_group.addAction(act)
+            act.triggered.connect(lambda _checked, target=cid: self.switch_character(target))
+            role.addAction(act)
+
         menu.addSeparator()
-        menu.addAction("退出 Rockabuddy", QApplication.quit)
+        quit_act = menu.addAction("🚪  退出 Rockabuddy")
+        quit_act.triggered.connect(QApplication.quit)
         menu.exec(event.globalPos())
 
     def resize_pet(self, height):

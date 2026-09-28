@@ -64,12 +64,13 @@ def main():
                         "unit": "积分", "note": "体验版 · 奖励积分 09/30 到期", "error": None},
     }
     history = []
-    base = 1758800000
-    for i in range(24):
-        for pid, pct in [("cursor", 95 - i * 1.5), ("trae", 100 - i * 3.2),
-                         ("codex", 90 - i * 1.8)]:
-            history.append({"ts": base + i * 3600 * 13, "id": pid,
-                            "pct": max(2, pct)})
+    now = __import__("time").time()
+    # 覆盖最近 24h, 每 40 分钟一个点: 驱动趋势火花线与燃烧速率
+    for i in range(36):
+        ts = now - (35 - i) * 2400
+        for pid, pct in [("cursor", 62 - i * .55), ("trae", 92 - i * .6),
+                         ("codex", 78 - i * .9), ("zcode", 68 - i * .5)]:
+            history.append({"ts": int(ts), "id": pid, "pct": max(2, pct)})
 
     board = Dashboard()
     board._finish_init()

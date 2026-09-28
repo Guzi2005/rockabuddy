@@ -1,11 +1,14 @@
 """Compact single-screen companion panel: reset countdowns first, no scrolling."""
+import ctypes
 import math
 import os
 import time
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QTimer, Signal
+from PySide6.QtGui import (QColor, QLinearGradient, QPainter, QPainterPath, QPen,
+                           QPixmap, QImage)
 from PySide6.QtWidgets import (QWidget, QFrame, QLabel, QPushButton, QVBoxLayout,
-    QHBoxLayout, QDialog, QLineEdit, QSizePolicy)
+    QHBoxLayout, QDialog, QLineEdit, QSizePolicy, QApplication, QScrollArea,
+    QScrollBar)
 import paths
 from credentials import save_secret
 
@@ -13,9 +16,6 @@ ICON_DIR = paths.resource_path("assets", "icons")
 
 STYLE = """
 QWidget {font-family:'Microsoft YaHei UI';font-size:11px;color:#30474a;}
-QWidget#panel {background:#f4f4f0;border:1px solid #d9dcd2;border-radius:18px;}
-QWidget#header {background:#121b1d;border-top-left-radius:17px;border-top-right-radius:17px;}
-QFrame#hero {background:#141a1a;border:0;border-radius:14px;}
 QLabel {background:transparent;border:0;}
 QLabel#muted {color:#788784;font-size:10px;}
 QLabel#mutedLight {color:#8fa3a0;font-size:10px;}
@@ -29,9 +29,13 @@ QPushButton:disabled {color:#98a09a;}
 QPushButton#ghost {background:#232f31;color:#cfe0d6;border-radius:8px;padding:5px 10px;}
 QPushButton#ghost:hover {background:#2f3f41;}
 QPushButton#ghost:disabled {color:#6b7d7a;}
-QProgressBar {background:#edf1ea;border:0;border-radius:3px;height:5px;}
-QProgressBar::chunk {background:#5fae9f;border-radius:3px;}
 QLineEdit {background:white;border:1px solid #d4d8c9;border-radius:7px;padding:6px;}
+QScrollArea {background:transparent;border:0;}
+QScrollArea > QWidget > QWidget {background:transparent;}
+QScrollBar:vertical {background:transparent;width:5px;margin:0;}
+QScrollBar::handle:vertical {background:#c2c7ba;border-radius:2px;min-height:30px;}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {height:0;}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {background:transparent;}
 """
 
 BADGES = {
@@ -218,10 +222,78 @@ class ConnectDialog(QDialog):
 SEG_REMAIN, SEG_TODAY, SEG_BEFORE = "#5fae9f", "#e0a458", "#c2c7ba"
 
 
+# ---------------- 额度动态: 序列/燃烧速率 ----------------
+def provider_series(history, pid, hours=24, now=None):
+    """该服务最近 hours 小时的 (时刻, 剩余%) 序列, 时间升序。"""
+    now = time.time() if now is None else now
+    cutoff = now - hours * 3600
+    pts = [(r["ts"], r["pct"]) for r in history
+           if r.get("id") == pid and cutoff <= r.get("ts", 0) <= now]
+    pts.sort()
+    return pts
+
+
+def burn_rate(pts, now=None):
+    """燃烧速率 %/小时, 正=在烧, 负=恢复中。近 3h 优先, 点少退化到 12h/全程。"""
+    if len(pts) < 2:
+        return None
+    now = pts[-1][0] if now is None else now
+    for span in (3 * 3600, 12 * 3600, None):
+        window = [p for p in pts if now - p[0] <= span] if span else pts
+        if len(window) >= 2:
+            (t0, p0), (t1, p1) = window[0], window[-1]
+            dt = t1 - t0
+            if dt >= 1200:                      # 至少 20 分钟跨度才可信
+                return (p0 - p1) / dt * 3600.0
+    return None
+
+
+class Sparkline(QWidget):
+    """24h 剩余比例迷你趋势: 折线 + 渐变填充 + 末端亮点。"""
+
+    def __init__(self, pts, color="#5fae9f", parent=None):
+        super().__init__(parent)
+        self.setFixedSize(66, 20)
+        now = pts[-1][0] if pts else time.time()
+        self._pts = [(max(0.0, (ts - (now - 24 * 3600)) / (24 * 3600.0)), pct)
+                     for ts, pct in pts]
+        self._color = QColor(color)
+
+    def paintEvent(self, event):
+        if len(self._pts) < 2:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        path = QPainterPath()
+        for i, (fx, pct) in enumerate(self._pts):
+            x = 1.5 + max(0.0, min(1.0, fx)) * (w - 3)
+            y = 2 + (1 - max(0.0, min(100.0, pct)) / 100.0) * (h - 5)
+            path.moveTo(x, y) if i == 0 else path.lineTo(x, y)
+        fill = QPainterPath(path)
+        fill.lineTo(w - 1.5, h - 1)
+        fill.lineTo(1.5, h - 1)
+        fill.closeSubpath()
+        g = QLinearGradient(0, 0, 0, h)
+        top = QColor(self._color)
+        top.setAlpha(70)
+        g.setColorAt(0, top)
+        g.setColorAt(1, QColor(0, 0, 0, 0))
+        p.setPen(Qt.NoPen)
+        p.setBrush(g)
+        p.drawPath(fill)
+        p.setPen(QPen(self._color, 1.4))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+        p.setBrush(self._color)
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(path.currentPosition(), 2.2, 2.2)
+
+
 def seg_bar(segments, drained=False):
     """三段横条: 剩余 / 今日已耗 / 此前已耗, 宽度按百分比分配, 零段不画。"""
     holder = QWidget()
-    holder.setFixedHeight(5)
+    holder.setFixedHeight(6)
     row = QHBoxLayout(holder)
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(1)
@@ -229,20 +301,109 @@ def seg_bar(segments, drained=False):
         if pct <= 0.05:
             continue
         chunk = QFrame()
-        chunk.setFixedHeight(5)
-        chunk.setStyleSheet("background:%s;border-radius:1px;"
+        chunk.setFixedHeight(6)
+        chunk.setStyleSheet("background:%s;border-radius:2px;"
                             % ("#b9bfc0" if drained else color))
         row.addWidget(chunk, max(1, int(round(pct))))
     return holder
 
 
+# ---------------- 挂牌头部 + 毛玻璃 ----------------
+HOLE_W, HOLE_H, HOLE_Y = 110, 22, 8    # 顶部胶囊挂孔的几何
+HEADER_H = 94                          # 挂牌头总高(挂孔行 + 复活信息行)
+
+ACCENT_DISABLED = 0
+ACCENT_ACRYLIC = 4
+WCA_ACCENT_POLICY = 19
+
+
+class _AccentPolicy(ctypes.Structure):
+    _fields_ = [("AccentState", ctypes.c_uint), ("AccentFlags", ctypes.c_uint),
+                ("GradientColor", ctypes.c_uint), ("AnimationId", ctypes.c_uint)]
+
+
+class _CompAttrData(ctypes.Structure):
+    _fields_ = [("Attribute", ctypes.c_int), ("Data", ctypes.c_void_p),
+                ("SizeOfData", ctypes.c_size_t)]
+
+
+def _set_window_acrylic(hwnd, tint_abgr):
+    """Windows 亚克力毛玻璃; tint_abgr=None 关闭。失败静默(旧系统/离屏)。"""
+    if os.name != "nt" or not hwnd:
+        return False
+    try:
+        if tint_abgr is None:
+            accent = _AccentPolicy(ACCENT_DISABLED, 0, 0, 0)
+        else:
+            accent = _AccentPolicy(ACCENT_ACRYLIC, 2, tint_abgr, 0)
+        data = _CompAttrData(WCA_ACCENT_POLICY,
+                             ctypes.cast(ctypes.byref(accent), ctypes.c_void_p),
+                             ctypes.sizeof(accent))
+        return bool(ctypes.windll.user32.SetWindowCompositionAttribute(
+            ctypes.c_void_p(int(hwnd)), ctypes.byref(data)))
+    except Exception:
+        return False
+
+
+def _hole_path(parent_w):
+    """挂牌胶囊挂孔: 顶部中央, 真透明穿透窗口。"""
+    hole = QPainterPath()
+    hole.addRoundedRect(QRectF(parent_w / 2 - HOLE_W / 2, HOLE_Y, HOLE_W, HOLE_H),
+                        HOLE_H / 2, HOLE_H / 2)
+    return hole
+
+
+class HeaderBlock(QWidget):
+    """深色挂牌头: 顶角圆 + 胶囊挂孔 + 复活信息, 替代原顶栏+英雄区两块黑。"""
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        path = QPainterPath()
+        path.moveTo(0, h)
+        path.lineTo(0, 16)
+        path.quadTo(0, 0, 16, 0)
+        path.lineTo(w - 16, 0)
+        path.quadTo(w, 0, w, 16)
+        path.lineTo(w, h)
+        path.closeSubpath()
+        p.setPen(Qt.NoPen)
+        p.fillPath(path.subtracted(_hole_path(w)), QColor("#121b1d"))
+        # 孔缘一道浅描边, 有点厚度感
+        p.setPen(QPen(QColor("#2c3a3c"), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(_hole_path(w))
+
+
+class PanelSurface(QFrame):
+    """面板底: 圆角实底, 中上挖穿挂孔(配合毛玻璃时只画边框)。"""
+
+    def __init__(self):
+        super().__init__()
+        self.glass = False
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        body = QPainterPath()
+        body.addRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 18, 18)
+        body = body.subtracted(_hole_path(w))
+        if not self.glass:
+            p.fillPath(body, QColor("#f4f4f0"))
+        p.setPen(QPen(QColor("#d9dcd2"), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(body)
+
+
 class UsageCard(QFrame):
-    """一排一个服务: 图标+名称+徽章+强调值一行, 下方每个额度窗口一条三段横条。
-    不加卡片底色, 靠排版分层。"""
+    """一排一个服务: 大行值 + 动态行(趋势/速率/倒计时) + 每个额度窗口一条三段横条。"""
     edited = Signal(str, float, object)
     connected = Signal()
 
-    def __init__(self, cfg, data, color="#5fae9f", baseline=None, parent=None):
+    def __init__(self, cfg, data, color="#5fae9f", baseline=None, series=None,
+                 parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.cfg, self.data = cfg, data
@@ -250,19 +411,20 @@ class UsageCard(QFrame):
         self.countdowns = []
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 5, 4, 3)
-        root.setSpacing(3)
+        root.setSpacing(4)
 
         pct = service_pct(data)
         drained = (data.get("ok") and not data.get("stale")
                    and pct is not None and pct <= 0.5)
         kind = cfg.get("type")
 
-        # ---- 行 1: 图标 名称 徽章 …… 强调值 ----
+        # ---- 行 1: 图标 名称 徽章 …… 大号主值 ----
         top = QHBoxLayout()
         top.setSpacing(5)
-        top.addWidget(icon_widget(cfg["id"], color, 20, gray=drained))
+        top.addWidget(icon_widget(cfg["id"], color, 22, gray=drained))
         name = label(cfg.get("name", "?"))
-        name.setStyleSheet("font-weight:700;font-size:11px" + (";color:#98a09a" if drained else ""))
+        name.setStyleSheet("font-weight:700;font-size:12px" +
+                           (";color:#98a09a" if drained else ""))
         top.addWidget(name)
         if kind == "manual":
             key = "manual"
@@ -285,52 +447,83 @@ class UsageCard(QFrame):
         strong = "#98a09a" if drained else "#1d2a2b"
         resets = next_reset(data)
         if resets:
-            soon = resets - time.time() < 20 * 3600
-            fmt = "%H:%M" if soon else "%m/%d %H:%M"
-            value = label(time.strftime(fmt, time.localtime(resets)) + " 复活")
-            value.setStyleSheet("font-size:12px;font-weight:800;color:%s;" % strong)
-            top.addWidget(value)
-            self._cd = label("", "muted")
-            self.countdowns.append((self._cd, resets))
+            soon = resets - time.time() < 2 * 3600
+            fmt = "%H:%M" if resets - time.time() < 20 * 3600 else "%m/%d %H:%M"
+            when = label(time.strftime(fmt, time.localtime(resets)))
+            when.setStyleSheet("font-size:14px;font-weight:800;color:%s;"
+                               % ("#c96a4a" if soon and not drained else strong))
+            top.addWidget(when)
+            cap = label(" 复活", "muted")
+            top.addWidget(cap)
         elif data.get("ok") and data.get("remaining") is not None:
             unit = data.get("unit", "")
             remaining = data["remaining"]
-            if unit == "¥":
-                value = label("¥ %.2f" % remaining)
-            elif data.get("total"):
-                value = label("%g/%g %s" % (remaining, data["total"], unit))
+            if not drained and pct is not None and pct < 10:
+                big = "#bb5b3f"
+            elif not drained and pct is not None and pct < 30:
+                big = "#c96a4a"
             else:
-                value = label("%g %s" % (remaining, unit))
-            value.setStyleSheet("font-size:12px;font-weight:800;color:%s;" % strong)
-            top.addWidget(value)
+                big = strong
+            if unit == "%":
+                big_v = label("%.0f%%" % remaining)
+            elif unit == "¥":
+                big_v = label("¥ %.2f" % remaining)
+            elif data.get("total"):
+                big_v = label("%g" % remaining)
+            else:
+                big_v = label("%g %s" % (remaining, unit))
+            big_v.setStyleSheet("font-size:16px;font-weight:800;color:%s;" % big)
+            top.addWidget(big_v)
+            if data.get("total") and unit != "%":
+                top.addWidget(label("/%g %s" % (data["total"], unit), "muted"))
         else:
             top.addWidget(label("待连接", "muted"))
         root.addLayout(top)
 
-        # ---- 行 2: muted 说明(倒计时/附注) + 手动更新/连接按钮 ----
-        note = data.get("error") or data.get("note") or ""
-        second = QHBoxLayout()
-        second.setSpacing(6)
+        # ---- 行 2: 动态行 —— 24h 趋势 · 燃烧速率 · 倒计时 · 操作按钮 ----
+        series = series or []
+        dyn = QHBoxLayout()
+        dyn.setSpacing(7)
+        if len(series) >= 2 and pct is not None:
+            dyn.addWidget(Sparkline(series, SEG_REMAIN))
+            dyn.addWidget(label("24h", "muted"))
+        rate = burn_rate(series) if len(series) >= 2 else None
+        if rate is not None and abs(rate) >= 0.15:
+            if rate > 0:
+                hot = "#c96a4a" if rate > 1.5 else "#e0a458"
+                chip = label("↓ %.1f%%/h" % rate)
+                chip.setStyleSheet("font-size:11px;font-weight:800;color:%s;" % hot)
+            else:
+                chip = label("↑ %.1f%%/h" % (-rate))
+                chip.setStyleSheet("font-size:11px;font-weight:800;color:#5fae9f;")
+            dyn.addWidget(chip)
+        elif rate is not None:
+            dyn.addWidget(label("→ 平稳", "muted"))
+        dyn.addStretch()
         if resets:
-            second.addWidget(self._cd)
-        elif note:
-            muted = label(note, "muted")
-            muted.setWordWrap(True)
-            second.addWidget(muted, 1)
+            self._cd = label("")
+            self._cd.setStyleSheet("font-size:11px;font-weight:700;color:#1d2a2b;")
+            self.countdowns.append((self._cd, resets))
+            dyn.addWidget(self._cd)
         if kind == "manual":
-            second.addStretch()
             action = QPushButton("更新")
             action.setFixedHeight(18)
             action.clicked.connect(self.configure)
-            second.addWidget(action)
+            dyn.addWidget(action)
         elif kind in ("moonshot", "kimi", "kimi_coding", "siliconflow") and not data.get("ok"):
-            second.addStretch()
             action = QPushButton("连接")
             action.setFixedHeight(18)
             action.clicked.connect(self.configure)
-            second.addWidget(action)
-        if second.count():
-            root.addLayout(second)
+            dyn.addWidget(action)
+        if dyn.count():
+            root.addLayout(dyn)
+
+        # ---- 错误行(同步失败/接口停用才占一行, 静态附注进 tooltip) ----
+        if data.get("error"):
+            err = label(data["error"], "muted")
+            err.setWordWrap(True)
+            err.setStyleSheet("color:#bb5b3f;font-size:10px;")
+            root.addWidget(err)
 
         # ---- 额度窗口横条: 一窗一条, 三段=剩余/今日已耗/此前已耗 ----
         windows = (data.get("windows") or [])[:3]
@@ -411,48 +604,53 @@ class Dashboard(QWidget):
         self._hero_pid = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        surface = QWidget()
-        surface.setObjectName("panel")
+        surface = PanelSurface()
+        self._surface = surface
+        self._glass = 0
         outer.addWidget(surface)
         self.setStyleSheet(STYLE)
         root = QVBoxLayout(surface)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ---- 深色顶栏: 只有刷新/收起, 无标题无头像 ----
-        header = QWidget()
-        header.setObjectName("header")
-        header.setFixedHeight(34)
-        head = QHBoxLayout(header)
-        head.setContentsMargins(10, 0, 10, 0)
-        head.setSpacing(6)
-        head.addStretch()
+        # ---- 挂牌头: 深色一体块, 顶部胶囊挂孔(真透明), 复活信息在下 ----
+        block = HeaderBlock()
+        block.setFixedHeight(HEADER_H)
+        block_root = QVBoxLayout(block)
+        block_root.setContentsMargins(0, 0, 0, 0)
+        block_root.setSpacing(0)
+
+        rowa = QHBoxLayout()
+        rowa.setContentsMargins(14, 7, 14, 0)
+        rowa.setSpacing(6)
+        brand = label("ROCKABUDDY")
+        brand.setStyleSheet("color:#8fa3a0;font-size:9px;font-weight:700;letter-spacing:3px;")
+        brand.setFixedWidth(130)
+        rowa.addWidget(brand)
+        rowa.addStretch(1)
+        spacer = QWidget()               # 给挂孔让位的透明安全区
+        spacer.setFixedSize(HOLE_W + 12, HOLE_H)
+        rowa.addWidget(spacer)
+        rowa.addStretch(1)
         self.btn_refresh = QPushButton("⟳ 刷新")
         self.btn_refresh.setObjectName("ghost")
         self.btn_refresh.setFixedHeight(22)
         self.btn_refresh.clicked.connect(self.refresh_requested)
-        head.addWidget(self.btn_refresh)
+        rowa.addWidget(self.btn_refresh)
         close = QPushButton("×")
         close.setObjectName("ghost")
         close.setAccessibleName("收起看板")
         close.setFixedSize(22, 22)
         close.setStyleSheet("padding:0px;")
         close.clicked.connect(self.hide)
-        head.addWidget(close)
-        root.addWidget(header)
+        rowa.addWidget(close)
+        block_root.addLayout(rowa)
 
-        body = QWidget()
-        body_root = QVBoxLayout(body)
-        body_root.setContentsMargins(10, 8, 10, 8)
-        body_root.setSpacing(8)
-        root.addWidget(body, 1)
-
-        # ---- 英雄区: 下次复活(图标 + 大倒计时) ----
-        hero = QFrame()
-        hero.setObjectName("hero")
-        hero.setFixedHeight(54)
-        hero_layout = QHBoxLayout(hero)
-        hero_layout.setContentsMargins(10, 6, 10, 6)
+        # ---- 复活信息行(原英雄区并入挂牌头) ----
+        hero_row = QWidget()
+        hero_row.setFixedHeight(56)
+        hero_layout = QHBoxLayout(hero_row)
+        hero_layout.setContentsMargins(12, 4, 12, 8)
         hero_layout.setSpacing(8)
         self.hero_icon = QLabel()
         self.hero_icon.setFixedSize(30, 30)
@@ -476,7 +674,22 @@ class Dashboard(QWidget):
         self.hero_hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         right.addWidget(self.hero_hint)
         hero_layout.addLayout(right)
-        body_root.addWidget(hero)
+        block_root.addWidget(hero_row)
+        root.addWidget(block)
+
+        # ---- 响应式内容区: 屏幕放不下时内部滚动而不是被截断 ----
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        body = QWidget()
+        self._body = body
+        body_root = QVBoxLayout(body)
+        body_root.setContentsMargins(10, 8, 10, 8)
+        body_root.setSpacing(8)
+        self._scroll.setWidget(body)
+        root.addWidget(self._scroll, 1)
 
         # ---- 服务行: 一排一个, 无卡片底, 一屏放下 ----
         self.items = QVBoxLayout()
@@ -494,9 +707,63 @@ class Dashboard(QWidget):
         self._fit_height()
 
     def _fit_height(self):
+        """固定宽 320; 高度按内容, 超过屏幕可用高度就收进屏幕(内容转内部滚动)。"""
+        content = HEADER_H + self._body.sizeHint().height() + 2
+        scr = QApplication.primaryScreen().availableGeometry()
         self.setFixedWidth(320)
-        self.layout().activate()
-        self.setFixedSize(320, self.sizeHint().height())
+        self.setFixedHeight(min(content, int(scr.height() * .92)))
+
+    def reposition_for(self, pet):
+        """贴着桌宠选位: 左/右/上/下, 钳进屏幕可用区且不遮桌宠;
+        放不下时先收缩高度(内容转内部滚动)再试, 都不行退到重叠最小的方位。"""
+        petg = pet.frameGeometry()
+        scr = (QApplication.screenAt(petg.center())
+               or QApplication.primaryScreen()).availableGeometry()
+        content = HEADER_H + self._body.sizeHint().height() + 2
+        self.setFixedWidth(320)
+        self.setFixedHeight(min(content, int(scr.height() * .92)))
+        bw, bh, gap = self.width(), self.height(), 10
+        candidates = [
+            (petg.left() - gap - bw, petg.center().y() - bh // 2),   # 左
+            (petg.right() + gap, petg.center().y() - bh // 2),       # 右
+            (petg.center().x() - bw // 2, petg.top() - gap - bh),    # 上
+            (petg.center().x() - bw // 2, petg.bottom() + gap),      # 下
+        ]
+        best = None
+        for cx, cy in candidates:
+            x = min(max(scr.left(), cx), scr.right() - bw + 1)
+            y = min(max(scr.top(), cy), scr.bottom() - bh + 1)
+            rect = QRect(x, y, bw, bh)
+            inter = rect.intersected(petg)
+            overlap = inter.width() * inter.height()
+            if scr.contains(rect) and overlap == 0:
+                best = rect
+                break
+            score = (0 if scr.contains(rect) else 1, overlap)
+            if best is None or score < best[0]:
+                best = (score, rect)
+        if not isinstance(best, QRect):
+            best = best[1]
+        self.move(best.topLeft())
+
+    def apply_glass(self, transparency):
+        """看板毛玻璃透明度: 0=不透明关闭, 其余为透过比例(1-90)。"""
+        transparency = max(0, min(90, int(transparency)))
+        self._glass = transparency
+        self._surface.glass = transparency > 0
+        self._surface.update()
+        if transparency <= 0:
+            _set_window_acrylic(self.winId(), None)
+        else:
+            alpha = round(255 * (1 - transparency / 100.0))
+            tint = (alpha << 24) | (0xF0 << 16) | (0xF4 << 8) | 0xF4   # #f4f4f0 → ABGR
+            _set_window_acrylic(self.winId(), tint)
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._glass > 0:
+            self.apply_glass(self._glass)   # 窗口句柄可能被重建, 重投一次
 
     def _finish_init(self):
         pass
@@ -550,7 +817,8 @@ class Dashboard(QWidget):
         for index, cfg in enumerate(self.cfg.get("providers", [])):
             card = UsageCard(cfg, self.results.get(cfg["id"], {}),
                              PALETTE[index % len(PALETTE)],
-                             baseline=self._day_baseline(cfg["id"], midnight))
+                             baseline=self._day_baseline(cfg["id"], midnight),
+                             series=provider_series(self.history, cfg["id"]))
             card.edited.connect(self.manual_edited)
             card.connected.connect(self.refresh_requested)
             self.items.addWidget(card)

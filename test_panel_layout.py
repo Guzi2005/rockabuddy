@@ -1,7 +1,10 @@
+import os
+import time
 import unittest
-from PySide6.QtCore import QRectF
-from PySide6.QtWidgets import QApplication, QLabel
-from panel import Dashboard, UsageCard, SEG_REMAIN, SEG_TODAY, SEG_BEFORE
+from PySide6.QtCore import QRect, QRectF
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from panel import (Dashboard, UsageCard, SEG_REMAIN, SEG_TODAY, SEG_BEFORE,
+                   provider_series, burn_rate)
 from animation import SpritePlayer, SUNFLOWER_DANCE_FRAMES, SUNFLOWER_HOLD_FRAME
 from pet import PetWidget, ASSET
 import os
@@ -44,7 +47,6 @@ class CleanPanelTests(unittest.TestCase):
         card.close()
 
     def test_multi_window_quota_renders_one_bar_per_window(self):
-        from PySide6.QtWidgets import QWidget
         cfg={'providers':[{'id':'codex','name':'Codex','type':'codex'}]}
         data={'codex':{'ok':True,'remaining':8,'total':100,'windows':[
             {'label':'5 小时','remaining_percent':8,'resets_at':2000000000},
@@ -54,10 +56,64 @@ class CleanPanelTests(unittest.TestCase):
         board.show()
         qt.processEvents()
         card=board.cards[0]
-        # seg_bar 的 holder: 固定高 5px 且带布局(色块 chunk 没有布局, 被排除)
+        # seg_bar 的 holder: 固定高 6px 且带布局(色块 chunk 没有布局, 被排除)
         bars=[w for w in card.findChildren(QWidget)
-              if w.height()==5 and w.layout() is not None]
+              if w.height()==6 and w.layout() is not None]
         self.assertEqual(len(bars),2)
+        board.close()
+
+    def test_provider_series_and_burn_rate(self):
+        now=1_800_000_000
+        hist=[{"id":"a","ts":now-7200,"pct":80},
+              {"id":"a","ts":now-3600,"pct":74},
+              {"id":"a","ts":now-600,"pct":70},
+              {"id":"b","ts":now-600,"pct":90}]
+        pts=provider_series(hist,"a",now=now)
+        self.assertEqual([p for _,p in pts],[80,74,70])
+        rate=burn_rate(pts,now=now)
+        self.assertAlmostEqual(rate, 10/6600*3600, places=2)
+        # 只有一个点算不出速率
+        self.assertIsNone(burn_rate(provider_series(hist,"b",now=now),now=now))
+        # 恢复(比例上升)是负速率
+        up=[(now-3600,50),(now-600,60)]
+        self.assertLess(burn_rate(up,now=now),0)
+
+    def test_dynamics_row_renders_sparkline_and_rate(self):
+        now = time.time()
+        hist=[{"id":"codex","ts":now-i*1800,"pct":80-i*2} for i in range(10)]
+        cfg={'providers':[{'id':'codex','name':'Codex','type':'codex'}]}
+        data={'codex':{'ok':True,'remaining':8,'total':100,'windows':[
+            {'label':'5 小时','remaining_percent':8,'resets_at':2000000000}]}}
+        board=Dashboard()
+        board.set_data(cfg,data,hist)
+        board.show()
+        qt.processEvents()
+        spark=[w for w in board.cards[0].findChildren(QWidget)
+               if w.width()==66 and w.height()==20]
+        self.assertEqual(len(spark),1)   # 24h 趋势图就位
+        board.close()
+
+    def test_reposition_keeps_panel_on_screen_clear_of_pet(self):
+        scr=QApplication.primaryScreen().availableGeometry()
+        pet=PetWidget()
+        pet.move(scr.center())
+        board=Dashboard()
+        board.set_data({'providers':[{'id':'x','name':'X','type':'manual'}]}, {})
+        board.reposition_for(pet)
+        rect=QRect(board.pos(),board.size())
+        self.assertTrue(scr.contains(rect))
+        self.assertFalse(rect.intersects(pet.frameGeometry()))
+        board.close()
+        pet.close()
+
+    def test_glass_toggle_stores_state(self):
+        board=Dashboard()
+        board.apply_glass(45)
+        self.assertEqual(board._glass,45)
+        self.assertTrue(board._surface.glass)
+        board.apply_glass(0)
+        self.assertEqual(board._glass,0)
+        self.assertFalse(board._surface.glass)
         board.close()
 
     def test_sunflower_never_loads_or_dances_bad_frames(self):

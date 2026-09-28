@@ -88,5 +88,31 @@ class CompanionTests(unittest.TestCase):
                     os.environ["LOCALAPPDATA"] = old
 
 
+class OperaNoteTests(unittest.TestCase):
+    def test_release_creates_note_scaled_by_phrase(self):
+        pet = PetWidget()
+        pet._now = 10.0
+        pet._opera_note_at = 10.0 - 1.5          # 1.5 秒长音
+        pet._release_opera_note()
+        self.assertEqual(len(pet._notes), 1)
+        birth, x0, y0, drift, glyph, size, rise = pet._notes[0]
+        self.assertEqual(glyph, "♫")             # 超过一秒换双符干
+        self.assertAlmostEqual(size, 41.0)
+        pet._opera_note_at = -1.0
+        pet._release_opera_note()                # 没蓄音就不放
+        self.assertEqual(len(pet._notes), 1)
+        pet.close()
+
+    def test_beat_notes_suppressed_in_opera_mode(self):
+        pet = PetWidget()
+        pet._music_mode = "opera"
+        pet._on_beat(0.8, 0.5)
+        self.assertEqual(pet._notes, [])         # 美声的音符只由乐句释放
+        pet._music_mode = "rock"
+        pet._on_beat(0.8, 0.5)
+        self.assertEqual(len(pet._notes), 1)
+        pet.close()
+
+
 if __name__ == "__main__":
     unittest.main()

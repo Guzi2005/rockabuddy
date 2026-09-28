@@ -181,6 +181,7 @@ class PetWidget(QWidget):
         self._voice_at = -10.0
         self._opera_anchor = 0.0
         self._opera_side = 1
+        self._opera_note_at = -1.0    # 当前乐句开始时刻(>=0 表示嘴边正蓄着音符)
         self._notes = []           # 音符粒子: [birth, x0, y0, drift, glyph, size]
         self._last_note = -10.0
         self._listener = None
@@ -357,6 +358,7 @@ class PetWidget(QWidget):
         self.player.rocking = False
         self.player.talking = False
         self.player.opera = False
+        self._opera_note_at = -1.0
 
     def _on_beat(self, strength, period):
         now = time.monotonic() - self._epoch
@@ -383,8 +385,9 @@ class PetWidget(QWidget):
                 self._target_tilt = 9.0 * self._beat_dir
         else:
             self._beat_at = now
-        # 节拍催生音符: 从耳侧升起, 左右交替, 强拍更大
-        if now - self._last_note > .22 and len(self._notes) < 8:
+        # 节拍催生音符(仅节拍器/甩头): 美声模式的音符由乐句结束释放, 跟唱不出音符
+        if self._music_mode in ("rock", "metronome") \
+                and now - self._last_note > .22 and len(self._notes) < 8:
             self._last_note = now
             side = self._beat_dir
             self._notes.append([
@@ -405,15 +408,37 @@ class PetWidget(QWidget):
             self.player.talking = active
         elif self._music_mode == "opera":
             if active and not self.player.opera:
+                # 新乐句开始: 换边缓动, 嘴边开始蓄一个音符
                 self._opera_anchor = self._now
-                self._opera_side *= -1      # 每个乐句换一边缓动
+                self._opera_side *= -1
+                self._opera_note_at = self._now
+            elif not active and self.player.opera:
+                # 长音结束: 把蓄着的那个音符放走
+                self._release_opera_note()
             self.player.opera = active
+
+    def _release_opera_note(self):
+        """乐句结束: 嘴边蓄着的音符化作粒子升走, 越长的乐句音符越大。"""
+        if self._opera_note_at < 0:
+            return
+        dur = max(0.2, self._now - self._opera_note_at)
+        if len(self._notes) < 8:
+            self._notes.append([
+                self._now,
+                self.width() / 2 + self._opera_side * self.width() * .10,
+                min(40 + (self._full_h - 44) * .26, self.height() * .42),
+                self._opera_side * (4 + 4 * min(1.0, dur)),
+                "♫" if dur >= 1.0 else "♪",
+                min(46.0, 26.0 + dur * 10.0),
+                30.0])
+        self._opera_note_at = -1.0
 
     def _on_quiet(self):
         self._music_on = False
         self.player.rocking = False
         self.player.talking = False         # 无声立刻闭嘴待机
         self.player.opera = False
+        self._release_opera_note()          # 还蓄着的音符就地放走
         if self._drag_pos is None:
             self._target_tilt = 0.0
 
@@ -425,6 +450,7 @@ class PetWidget(QWidget):
         self.player.rocking = False
         self.player.talking = False
         self.player.opera = False
+        self._opera_note_at = -1.0
         if mode == "off":
             self._stop_listener()
             self.react("pet", "好，安静待命")
@@ -869,6 +895,25 @@ class PetWidget(QWidget):
                 p.drawText(area, Qt.AlignCenter, glyph)
                 p.restore()
             self._notes = alive
+        if self._music_mode == "opera" and self._opera_note_at >= 0 and self._animate:
+            # 美声蓄音: 乐句进行中音符悬在嘴边, 越唱越大、随响度呼吸, 唱完才放走
+            dur = max(0.0, self._now - self._opera_note_at)
+            glyph = "♫" if dur >= 1.0 else "♪"
+            size = min(46.0, 26.0 + dur * 10.0)
+            pulse = 1.0 + .08 * math.sin(self._now * 9) \
+                * min(1.0, self._voice_level * 5 + .3)
+            hx = self.width() / 2 + self._opera_side * self.width() * .10
+            hy = min(40 + (self._full_h - 44) * .26, self.height() * .42) + 14 \
+                + 1.5 * math.sin(self._now * 3)
+            area = QRectF(hx - size, hy - size, size * 2, size * 2)
+            p.save()
+            p.setFont(QFont("Microsoft YaHei UI", round(size * pulse), QFont.Bold))
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(area, Qt.AlignCenter, glyph)
+            p.setFont(QFont("Microsoft YaHei UI", round(size * pulse) - 2, QFont.Bold))
+            p.setPen(QColor(232, 182, 76) if glyph == "♫" else QColor(95, 174, 159))
+            p.drawText(area, Qt.AlignCenter, glyph)
+            p.restore()
         if self._launch_pix is not None:
             # 举图标 overlay: 蓄势期图标不露头, 托掌瞬间从掌心啵出
             # (回弹放大+转正+星星迸溅), 定格时随呼吸微浮, 末尾上浮淡出

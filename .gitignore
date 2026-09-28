@@ -1,0 +1,21 @@
+# 运行时数据(本机状态, 不入库)
+history.jsonl
+usage-cache.json
+sync-state.json
+config.json
+
+# 个人配置文件
+.workbuddy/
+NVIDIA Corporation/
+
+# 运行时提取的应用图标 / favicon 缓存(自动重建)
+assets/icons/apps/
+
+# 开发产物
+__pycache__/
+*.pyc
+work/
+preview_dashboard.png
+
+# 启动器(指向本机 Python 路径, 每台机器不同)
+start_tokenspy.vbs

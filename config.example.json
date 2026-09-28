@@ -1,0 +1,50 @@
+{
+  "refresh_minutes": 2,
+  "heartbeat_minutes": 30,
+  "sync_only_active": true,
+  "providers": [
+    {
+      "id": "codex",
+      "name": "Codex",
+      "type": "codex",
+      "unit": "%",
+      "processes": ["codex.exe"]
+    },
+    {
+      "id": "zcode",
+      "name": "ZCode",
+      "type": "zcode",
+      "unit": "万tok",
+      "daily_budget_tokens": 30000000,
+      "note": "统计本机 ZCode 今日实际消耗; daily_budget_tokens 留空则只显示消耗量",
+      "processes": ["ZCode.exe"]
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "type": "cursor",
+      "unit": "%",
+      "total": 500,
+      "remaining": 500,
+      "note": "Pro 每月快速请求额度, 双击卡片更新",
+      "processes": ["Cursor.exe"]
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "type": "kimi",
+      "unit": "%",
+      "note": "Coding Plan 额度"
+    },
+    {
+      "id": "trae",
+      "name": "Trae",
+      "type": "manual",
+      "unit": "次请求",
+      "total": 600,
+      "remaining": 600,
+      "note": "双击卡片更新",
+      "processes": ["Trae.exe"]
+    }
+  ]
+}

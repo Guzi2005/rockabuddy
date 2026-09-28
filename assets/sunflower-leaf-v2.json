@@ -1,0 +1,23 @@
+{
+  "atlas": "sunflower-leaf-v2.png",
+  "columns": 8,
+  "rows": 8,
+  "frame_count": 62,
+  "dance_frames": 25,
+  "lift_start": 25,
+  "lift_count": 37,
+  "hold_frame": 61,
+  "fps": 60,
+  "palm": [
+    0.74,
+    0.835
+  ],
+  "motion": "original two bottom leaves; slight 6-source-pixel tip lift",
+  "source_video": "work\\leaf-lift-v2\\sunflower-leaf-lift-alpha.mov",
+  "source_video_sha256": "0e10355e18c58c6c256c5430808e347c040f8fd02edb26b1f4c540ade75328e4",
+  "source_atlas_sha256": "5b3efcd147802ccd706dad36621e95f3d1409bb803ad4395eacdb545dc3d9b19",
+  "pinned_rows": [
+    0,
+    271
+  ]
+}

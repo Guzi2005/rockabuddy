@@ -280,6 +280,26 @@ class App(QObject):
         self.board.apply_glass(self.pet.panel_glass)
         self.board.provider_activated.connect(self.on_provider_activate)
 
+        self.timer = QTimer()           # 调度器: 每 15 秒检查一次谁到期
+        self.timer.timeout.connect(self.schedule_tick)
+        self.timer.start(15 * 1000)
+
+        self.tray = QSystemTrayIcon(QIcon(ICON), self.pet)
+        self.tray.setToolTip("Rockabuddy · AI 用量小管家")
+        menu = QMenu()
+        menu.addAction("打开 / 收起看板", self.toggle_board)
+        menu.addAction("找回桌宠", self.restore_pet)
+        menu.addAction("立即刷新", self.refresh_all)
+        menu.addSeparator()
+        menu.addAction("退出", self.qt.quit)
+        self.tray.setContextMenu(menu)
+        self.tray_menu = menu
+        self.tray.activated.connect(lambda reason: self.toggle_board()
+                                    if reason == QSystemTrayIcon.Trigger else None)
+        self.tray.show()
+        self.pet.show()
+        self.refresh_all()              # 启动先全量同步一次, 学习各窗口重置时间
+
     def on_provider_activate(self, pid):
         """面板里点了服务图标: 把对应应用窗口提到最前, 没开就按 launch 启动。"""
         cfg = next((c for c in self.cfg.get("providers", []) if c["id"] == pid), None)
@@ -300,26 +320,6 @@ class App(QObject):
             subprocess.Popen([launch], cwd=os.path.dirname(launch))
             return
         self.pet.react("pet", "没找到 %s 的窗口" % cfg.get("name", pid))
-
-        self.timer = QTimer()           # 调度器: 每 15 秒检查一次谁到期
-        self.timer.timeout.connect(self.schedule_tick)
-        self.timer.start(15 * 1000)
-
-        self.tray = QSystemTrayIcon(QIcon(ICON), self.pet)
-        self.tray.setToolTip("Rockabuddy · AI 用量小管家")
-        menu = QMenu()
-        menu.addAction("打开 / 收起看板", self.toggle_board)
-        menu.addAction("找回桌宠", self.restore_pet)
-        menu.addAction("立即刷新", self.refresh_all)
-        menu.addSeparator()
-        menu.addAction("退出", self.qt.quit)
-        self.tray.setContextMenu(menu)
-        self.tray_menu = menu
-        self.tray.activated.connect(lambda reason: self.toggle_board()
-                                   if reason == QSystemTrayIcon.Trigger else None)
-        self.tray.show()
-        self.pet.show()
-        self.refresh_all()              # 启动先全量同步一次, 学习各窗口重置时间
 
     def heartbeat_s(self):
         return max(5, int(self.cfg.get("heartbeat_minutes", 30) or 30)) * 60

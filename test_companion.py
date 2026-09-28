@@ -187,6 +187,44 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(pet._music_mode, "rock")
 
 
+    def test_app_init_shows_pet_and_tray(self):
+        """回归: App.__init__ 必须真正 show 桌宠与托盘(曾被方法插入拦腰截断)。"""
+        from unittest.mock import patch
+        import app as app_mod
+
+        class FakeApp:
+            def __init__(self, *a, **k):
+                class _Sig:
+                    def connect(self, f):
+                        pass
+                self.aboutToQuit = _Sig()
+
+            def setFont(self, *a):
+                pass
+
+            def setWindowIcon(self, *a):
+                pass
+
+            def setQuitOnLastWindowClosed(self, *a):
+                pass
+
+            def quit(self):
+                pass
+
+            def exec(self):
+                pass
+
+        with patch.object(app_mod, "QApplication", FakeApp), \
+                patch.object(app_mod, "FetchWorker") as fw:
+            fw.return_value.isRunning.return_value = False
+            a = app_mod.App()
+            self.addCleanup(a.shutdown)
+            self.assertTrue(a.pet.isVisible())
+            self.assertTrue(a.tray.isVisible())
+            self.assertTrue(a.pet.windowTitle().startswith("Rockabuddy"))
+            self.assertGreaterEqual(a.board.items.count(), 1)
+
+
 class OperaNoteTests(unittest.TestCase):
     def test_release_creates_note_scaled_by_phrase(self):
         pet = PetWidget()

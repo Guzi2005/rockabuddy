@@ -208,7 +208,8 @@ class CleanPanelTests(unittest.TestCase):
         qt.processEvents()
         card=board.cards[0]
         self.assertEqual(len(card.free_rows),2)
-        self.assertEqual(card.free_headline.text(),"当前 2 免费")
+        # 免费计数只保留徽章, 不再有大标题
+        self.assertFalse(hasattr(card,'free_headline'))
         # 限免/夜间免费中应被标绿(底色 e3f2ec)
         self.assertIn("e3f2ec", card.free_rows[0][1].styleSheet())
         board.close()

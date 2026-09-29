@@ -665,9 +665,6 @@ class UsageCard(QFrame):
         badge.setFixedHeight(16)
         top.addWidget(badge, 0, Qt.AlignVCenter)
         top.addStretch()
-        self.free_headline = label("当前 %d 免费" % count)
-        self.free_headline.setStyleSheet("font-size:14px;font-weight:800;color:#1d2a2b;")
-        top.addWidget(self.free_headline)
         lay.addLayout(top)
         for m in models:
             row = QHBoxLayout()
@@ -693,15 +690,11 @@ class UsageCard(QFrame):
         now = time.time()
         count = 0
         for dot, status, m in self.free_rows:
-            free_now, text, bg, fg = _free_status(m, now)
-            if free_now:
-                count += 1
+            _free_now, text, bg, fg = _free_status(m, now)
             dot.setStyleSheet("background:%s;border-radius:4px;" % fg)
             status.setText(text)
             status.setStyleSheet("background:%s;color:%s;border-radius:6px;"
                                 "padding:0px 5px;font-size:9px;" % (bg, fg))
-        if getattr(self, "free_headline", None) is not None:
-            self.free_headline.setText("当前 %d 免费" % count)
 
     def configure(self):
         if self.cfg.get("type") == "manual":

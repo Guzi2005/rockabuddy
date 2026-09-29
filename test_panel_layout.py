@@ -192,6 +192,30 @@ class CleanPanelTests(unittest.TestCase):
         self.assertEqual(got,['zcode'])
         board.close()
 
+    def test_free_card_icon_click_emits_activate(self):
+        from PySide6.QtCore import Qt, QPoint
+        from PySide6.QtTest import QTest
+        from panel import ProviderIcon
+        cfg={'providers':[{'id':'workbuddy','name':'WorkBuddy','type':'workbuddy_free',
+                           'processes':['WorkBuddy.exe'],
+                           'free_models':[{'name':'混元 Hy3','kind':'limited',
+                                           'until':'2099-01-01T00:00'}]}]}
+        data={'workbuddy':{'ok':True,'free_models':[
+                   {'name':'混元 Hy3','kind':'limited','until':'2099-01-01T00:00',
+                    'free_now':True}],
+               'free_count':1,'free_total':1,'source':'本地策略表'}}
+        board=Dashboard()
+        board.set_data(cfg,data)
+        got=[]
+        board.provider_activated.connect(got.append)
+        board.show()
+        qt.processEvents()
+        icons=board.cards[0].findChildren(ProviderIcon)
+        self.assertEqual(len(icons),1)      # 免费清单卡的图标也是可点的
+        QTest.mouseClick(icons[0], Qt.LeftButton, pos=QPoint(5,5))
+        self.assertEqual(got,['workbuddy'])
+        board.close()
+
 
     def test_workbuddy_free_model_list_renders(self):
         cfg={'providers':[{'id':'workbuddy','name':'WorkBuddy','type':'workbuddy_free',

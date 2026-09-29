@@ -8,7 +8,9 @@
       "name": "Codex",
       "type": "codex",
       "unit": "%",
-      "processes": ["codex.exe"]
+      "processes": [
+        "codex.exe"
+      ]
     },
     {
       "id": "zcode",
@@ -18,7 +20,9 @@
       "daily_budget_tokens": 30000000,
       "launch": "C:\\path\\to\\ZCode.exe",
       "note": "launch 可选: 看板点图标时没找到窗口就启动这个程序",
-      "processes": ["ZCode.exe"]
+      "processes": [
+        "ZCode.exe"
+      ]
     },
     {
       "id": "cursor",
@@ -28,14 +32,20 @@
       "total": 500,
       "remaining": 500,
       "note": "Pro 每月快速请求额度, 双击卡片更新",
-      "processes": ["Cursor.exe"]
+      "processes": [
+        "Cursor.exe"
+      ]
     },
     {
       "id": "kimi",
       "name": "Kimi",
       "type": "kimi",
       "unit": "%",
-      "note": "Coding Plan 额度"
+      "note": "Coding Plan 额度",
+      "processes": [
+        "Kimi.exe"
+      ],
+      "launch": "C:\\Users\\<你>\\AppData\\Local\\Programs\\kimi-desktop\\Kimi.exe"
     },
     {
       "id": "trae",
@@ -45,7 +55,9 @@
       "total": 600,
       "remaining": 600,
       "note": "双击卡片更新",
-      "processes": ["Trae.exe"]
+      "processes": [
+        "Trae.exe"
+      ]
     }
   ]
 }

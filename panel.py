@@ -672,7 +672,13 @@ class UsageCard(QFrame):
         total = data.get("free_total", len(models))
         top = QHBoxLayout()
         top.setSpacing(5)
-        top.addWidget(icon_widget(self.cfg["id"], color, 22))
+        clickable = bool(self.cfg.get("processes") or self.cfg.get("launch"))
+        icon = ProviderIcon(self.cfg["id"], color, 22,
+                            tip="点击前置窗口 / 启动" if clickable else "",
+                            clickable=clickable)
+        if clickable:
+            icon.clicked.connect(lambda: self.activate.emit(self.cfg["id"]))
+        top.addWidget(icon)
         name = label(self.cfg.get("name", "?"))
         name.setStyleSheet("font-weight:700;font-size:12px;")
         top.addWidget(name)

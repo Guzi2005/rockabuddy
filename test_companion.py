@@ -225,6 +225,45 @@ class TrainingTests(unittest.TestCase):
             self.assertGreaterEqual(a.board.items.count(), 1)
 
 
+class GreetHoldTests(unittest.TestCase):
+    def test_hover_holds_chin_pose_and_leave_plays_outro(self):
+        pet = PetWidget()
+        self.addCleanup(pet.close)
+        pet.enterEvent(None)
+        self.assertIn(pet.player.clip, ("greet", "wave"))
+        self.assertIsNotNone(pet.player.hold_frame)
+        t = time.monotonic() - pet._epoch
+        # 悬停期间无论多久都定格在握拳/举手姿势
+        self.assertEqual(pet.player.sample(t + 2.0), pet.player.hold_frame)
+        pet.leaveEvent(None)
+        self.assertIn(pet.player.clip, ("greet_out", "wave_out"))
+        self.assertIsNone(pet.player.hold_frame)
+
+    def test_say_hi_auto_finishes_after_hold(self):
+        pet = PetWidget()
+        self.addCleanup(pet.close)
+        from animation import CLIPS
+        pet.say_hi()
+        kind = pet.player.hold_kind
+        dur = sum(d for _i, d in CLIPS[kind])
+        self.assertIsNotNone(pet.player.hold_next)
+        # 上半程播完后处于定格姿势(避开 hold 到期点)
+        idx = pet.player.sample(pet._now + dur + 0.2)
+        self.assertEqual(idx, pet.player.hold_frame)
+        # 定格到期后自动接力收尾
+        pet.player.sample(pet._now + dur + 0.7)
+        self.assertIn(pet.player.clip, ("greet_out", "wave_out"))
+
+    def test_eased_clip_keeps_first_and_last_frames(self):
+        from animation import SpritePlayer, EASE_CLIPS
+        player = SpritePlayer(os.path.dirname(ASSET))
+        self.assertIn("stretch", EASE_CLIPS)
+        player.play("stretch", 0.0)
+        idx = [player.sample(i / 60) for i in range(int(2.2 * 60))]
+        self.assertEqual(idx[0], 25)
+        self.assertEqual(idx[-1], 0)
+
+
 class OperaNoteTests(unittest.TestCase):
     def test_release_creates_note_scaled_by_phrase(self):
         pet = PetWidget()

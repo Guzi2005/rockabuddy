@@ -10,7 +10,7 @@ from animation import SpritePlayer, SUNFLOWER_HOLD_FRAME, SUNFLOWER_PALM, SUNFLO
 
 from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QSettings, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QFont, QFontMetrics,
-                           QImage, QPainter, QPainterPath, QPen, QPixmap)
+                           QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform)
 from PySide6.QtWidgets import (QApplication, QMenu, QWidget,
                                QGraphicsDropShadowEffect)
 
@@ -37,34 +37,43 @@ MUSIC_MENU = {"off": "关闭",
 # 右键菜单: 纸质吊牌质感, 圆角行 + 互斥圆点/方形开关指示
 MENU_STYLE = """
 QMenu {
-  background: rgba(244,244,240,252);
+  background: #f6f7f3;
   border: 1px solid #d9dcd2;
-  border-radius: 12px;
-  padding: 6px;
+  border-radius: 10px;
+  padding: 5px;
+  font-size: 12px;
 }
-QMenu::item { padding: 6px 22px 6px 8px; border-radius: 8px; }
-QMenu::item:selected { background: #dcebe6; }
-QMenu::item:disabled { color: #98a09a; }
-QMenu::separator { height: 1px; background: #e2e5dc; margin: 5px 10px; }
+QMenu::item {
+  padding: 7px 26px 7px 22px;
+  border-radius: 7px;
+  color: #26383a;
+}
+QMenu::item:selected { background: #cfe4dc; color: #10201f; }
+QMenu::item:disabled { color: #a4aca8; }
+QMenu::item:checked { font-weight: 700; }
+QMenu::separator { height: 1px; background: #e0e4da; margin: 5px 10px; }
 QMenu::indicator:exclusive:unchecked {
   width: 13px; height: 13px;
-  border: 1.5px solid #b9bfc0; border-radius: 7px; background: white;
-  margin-left: 2px;
+  border: 1.5px solid #a9b2ad; border-radius: 7px; background: #ffffff;
+  left: 5px;
 }
 QMenu::indicator:exclusive:checked {
   width: 13px; height: 13px;
-  border: 4px solid #f4f4f0; border-radius: 7px; background: #5fae9f;
-  margin-left: 2px;
+  border: 1.5px solid #5fae9f; border-radius: 7px;
+  background: qradialgradient(cx:0.5, cy:0.5, radius:1, fx:0.5, fy:0.5,
+                              stop:0 #5fae9f, stop:0.42 #5fae9f,
+                              stop:0.55 #ffffff, stop:1 #ffffff);
+  left: 5px;
 }
 QMenu::indicator:non-exclusive:unchecked {
   width: 13px; height: 13px;
-  border: 1.5px solid #b9bfc0; border-radius: 4px; background: white;
-  margin-left: 2px;
+  border: 1.5px solid #a9b2ad; border-radius: 3px; background: #ffffff;
+  left: 5px;
 }
 QMenu::indicator:non-exclusive:checked {
   width: 13px; height: 13px;
-  border: 1.5px solid #5fae9f; border-radius: 4px; background: #5fae9f;
-  margin-left: 2px;
+  border: 1.5px solid #5fae9f; border-radius: 3px; background: #5fae9f;
+  left: 5px;
 }
 """
 
@@ -200,7 +209,10 @@ class PetWidget(QWidget):
         self._listener = None
         self._animate = self.settings.value("animate", True, type=bool)
         self._desk = self.settings.value("desk", False, type=bool)
-        self._panel_glass = self.settings.value("panel_glass", 0, type=int)
+        self._panel_glass = self.settings.value("panel_glass", 45, type=int)
+        if not self.settings.contains("panel_glass"):
+            # 一次性迁移: 旧版默认 0(关闭)升级为默认 45% 毛玻璃, 已手动改过的不动
+            self.settings.setValue("panel_glass", 45)
         # 光标跟踪: 身体朝光标方向的微小偏移(px)
         self._gaze_x = 0.0
         self._gaze_y = 0.0
@@ -305,6 +317,8 @@ class PetWidget(QWidget):
             else:
                 self.player.play("launch", now)
                 self.player.hold_frame = 26
+            self.player.hold_kind = "launch"
+            self.player.hold_next = None
             # 定格覆盖到图标淡出结束, 手不提前放下
             self.player.hold_until = now + self._launch_hold + .45
 
@@ -351,6 +365,8 @@ class PetWidget(QWidget):
             else:
                 self.player.play("launch", now)
                 self.player.hold_frame = 26
+            self.player.hold_kind = "launch"
+            self.player.hold_next = None
             self.player.hold_until = now + 4.2
 
     def _start_listener(self):
@@ -766,6 +782,9 @@ class PetWidget(QWidget):
     def react(self, clip, text):
         self._now = time.monotonic() - self._epoch
         self.player.play(clip, self._now)
+        self.player.hold_frame = None      # 新剪辑接管, 清掉悬停定格
+        self.player.hold_next = None
+        self.player.hold_kind = None
         self._reaction = text
         self._reaction_until = self._now + 2.2
         self._bubble_pop = self._now
@@ -773,6 +792,17 @@ class PetWidget(QWidget):
     def _greet_clip(self):
         """打招呼: 一半概率迎视, 一半概率招手(图集 17 号招手帧)。"""
         return "wave" if random.random() < .5 else "greet"
+
+    def say_hi(self):
+        """菜单触发: 打完整招呼——上半程播完定格半拍, 再自动播收尾。"""
+        from animation import CLIPS
+        clip = self._greet_clip()
+        self.react(clip, self.revive_text)
+        self.player.hold_frame = 6 if clip == "greet" else 17
+        self.player.hold_kind = clip
+        self.player.hold_next = "greet_out" if clip == "greet" else "wave_out"
+        # 定格从上半程播完才开始计时, 而不是从动画开始
+        self.player.hold_until = self._now + sum(d for _i, d in CLIPS[clip]) + 0.55
 
     def enterEvent(self, event):
         self._hover = True
@@ -783,11 +813,23 @@ class PetWidget(QWidget):
         if self.player.dozing:
             self._wake()
         else:
-            self.react(self._greet_clip(), self.revive_text)
+            clip = self._greet_clip()
+            self.react(clip, self.revive_text)
+            # 悬停保持: greet 定格在握拳托下巴, wave 定格在举手, 离开才播下半程
+            self.player.hold_frame = 6 if clip == "greet" else 17
+            self.player.hold_until = now + 9999.0
+            self.player.hold_kind = clip
         self.update()
 
     def leaveEvent(self, event):
         self._hover = False
+        kind = self.player.hold_kind
+        if self.player.hold_frame is not None and kind in ("greet", "wave"):
+            out = "greet_out" if kind == "greet" else "wave_out"
+            self.player.hold_frame = None
+            self.player.hold_kind = None
+            self.player.hold_next = None
+            self.player.play(out, time.monotonic() - self._epoch)
         self.update()
 
     def _icon(self, pid, gray=False):
@@ -894,14 +936,29 @@ class PetWidget(QWidget):
         # 节拍下沉: 节拍器用相位锁定的预测拍点(无状态高斯, 不受 onset 延迟抖动);
         # 摇滚/默认沿用 onset 触发的高斯脉冲, 拍前 150ms 微提预备
         rock = 0.0
+        dip = 0.0            # 节拍压扁量 0-1(触地瞬间身体微压扁)
+        sway_shear = 0.0     # 摇摆斜拉系数(pet 侧 SAI 变形, 替代逐帧摇摆)
         if self._animate and self._music_on:
-            if (self._music_mode == "metronome" and self.player.rocking
+            if (self._music_mode in ("metronome", "rock") and self.player.rocking
                     and self.player.rock_period > 0):
                 period = self.player.rock_period
-                phase = ((self._now - self.player.rock_anchor) / period) % 1.0
-                dist = min(phase, 1.0 - phase) * period      # 距最近预测拍点
-                rock -= (1.1 + 2.0 * min(1.0, self._beat_strength)) \
-                    * math.exp(-((dist / .05) ** 2))
+                s = math.sin(math.pi * (self._now - self.player.rock_anchor)
+                             / max(.2, period))
+                sway_shear = (0.13 if self._music_mode == "rock" else 0.075) * s
+                if self._music_mode == "metronome":
+                    phase = ((self._now - self.player.rock_anchor) / period) % 1.0
+                    dist = min(phase, 1.0 - phase) * period      # 距最近预测拍点
+                    dip = math.exp(-((dist / .05) ** 2))
+                    rock -= (1.1 + 2.0 * min(1.0, self._beat_strength)) * dip
+                else:
+                    since_beat = self._now - self._beat_at
+                    if since_beat >= 0:
+                        dip = math.exp(-((since_beat / .09) ** 2))
+                        rock -= (2.0 + 4.0 * self._beat_strength) * dip
+                        if self._beat_period > 0:
+                            to_next = self._beat_at + self._beat_period - self._now
+                            if 0 < to_next < .15:
+                                rock += 1.6 * self._beat_strength * (1 - to_next / .15)
             else:
                 since_beat = self._now - self._beat_at
                 if since_beat >= 0:
@@ -949,13 +1006,20 @@ class PetWidget(QWidget):
                 halo.append((x, y - (14 if self._desk else 16), text, t, drained))
         if not self.sprite.isNull():
             p.save()
-            # 旋转/呼吸的锚点钉死在脚底中点, 脚不动; 弹跳只是整体上下平移
+            # SAI 式自由变形: 斜拉(顶边平移、底边钉死在地平线)+ 轻微压缩/拉长,
+            # 不再做绕脚底的刚体旋转; 摇摆/眩晕/拖拽斜倾/美声缓动全走同一套变形
             feet_x, feet_y = rect.center().x(), rect.bottom()
-            p.translate(feet_x, feet_y)
-            p.rotate(self._tilt if self._animate else 0)
             breath = math.sin(self._phase) * .008 if self._animate else 0
-            p.scale(1 - breath * .5, 1 + breath)
-            p.translate(-feet_x, -feet_y)
+            k = math.tan(math.radians(self._tilt if self._animate else 0.0)) + sway_shear
+            k = max(-0.22, min(0.22, k))
+            squash = min(1.0, dip * 0.7 + abs(k) * 0.45)
+            t = QTransform()
+            t.translate(feet_x, feet_y)
+            t.shear(k, 0.0)
+            t.scale((1 + 0.05 * squash) * (1 - breath * .5),
+                    (1 - 0.07 * squash) * (1 + breath))
+            t.translate(-feet_x, -feet_y)
+            p.setTransform(t)
             # 举图标时的身体起伏: 蓄势微蹲 -> 上托回弹 -> 定格微浮
             lift = 0.0
             if self._launch_pix is not None and self._animate:
@@ -981,6 +1045,10 @@ class PetWidget(QWidget):
                 draw_rect.setX(draw_rect.center().x() - dw / 2)
                 draw_rect.setWidth(dw)
             self.player.draw(p, draw_rect, index, self.sprite, now=self._now)
+            # 记录头顶位置(含斜拉偏移), 气泡与光环据此贴合当前角色身高
+            head_rect = self.player.drawn_rect(draw_rect, index, self.sprite)
+            self._head_top = head_rect.top()
+            self._head_cx = head_rect.center().x() - k * (feet_y - head_rect.top())
             if self.player.character == "owl":
                 self._launch_rect = self.player.drawn_rect(draw_rect, 26, self.sprite)
             elif len(self.player.frames) > SUNFLOWER_HOLD_FRAME:
@@ -1136,7 +1204,7 @@ class PetWidget(QWidget):
                     p.restore()
         bubble = "" if halo_active else self._bubble_text()
         if bubble:
-            # pop 对话气泡: 从头侧长出, 斜尾巴指向耳旁;
+            # pop 对话气泡: 悬在当前角色头顶(随身高/帧形变自适应), 斜尾巴指向头顶;
             # 框体与尾巴做路径并集, 交界没有描边隔断;
             # 举着图标/叠叠乐时气泡靠右站, 让出左上掌心区域不遮图标
             t = min(1, max(0, (self._now - self._bubble_pop) / .18))
@@ -1150,16 +1218,18 @@ class PetWidget(QWidget):
             else:
                 bx = (self.width() - bw) / 2
             p.save()
-            tail_tip = QPointF(self.width() * .74, 52)
+            by = max(2.0, self._head_top - 36.0)
+            tail_tip = QPointF(min(max(self._head_cx + self.width() * .16, 40.0),
+                                   self.width() - 40.0), by + 26.0)
             p.translate(tail_tip)
             p.scale(scale, scale)
             p.translate(-tail_tip)
             base_x = min(max(tail_tip.x(), bx + 12), bx + bw - 12)  # 尾根收在框底内
             box = QPainterPath()
-            box.addRoundedRect(QRectF(bx, 4, bw, 28), 14, 14)
+            box.addRoundedRect(QRectF(bx, by, bw, 28), 14, 14)
             spike = QPainterPath()
-            spike.moveTo(base_x - 10, 30)
-            spike.lineTo(base_x + 8, 30)
+            spike.moveTo(base_x - 10, by + 26)
+            spike.lineTo(base_x + 8, by + 26)
             spike.lineTo(tail_tip)
             spike.closeSubpath()
             p.setPen(QPen(QColor("#d9d9c9"), 1))
@@ -1167,7 +1237,7 @@ class PetWidget(QWidget):
             p.drawPath(box.united(spike))
             p.setPen(QColor("#f4f6f2"))
             p.setFont(font)
-            p.drawText(QRectF(bx + 2, 4, bw - 4, 28), Qt.AlignCenter, bubble)
+            p.drawText(QRectF(bx + 2, by, bw - 4, 28), Qt.AlignCenter, bubble)
             p.restore()
         placed = []  # 已放置的胶囊, 碰撞就往上一排让位, 互不重叠
         for x, y, text, t, drained in halo:
@@ -1384,22 +1454,25 @@ class PetWidget(QWidget):
         shadow.setColor(QColor(18, 27, 29, 90))
         menu.setGraphicsEffect(shadow)
 
-        open_act = menu.addAction("📊  打开 / 收起看板")
+        open_act = menu.addAction("打开 / 收起看板")
+        bold = open_act.font()
+        bold.setBold(True)
+        open_act.setFont(bold)
         open_act.triggered.connect(self.clicked.emit)
-        refresh_act = menu.addAction("🔄  立即刷新")
+        refresh_act = menu.addAction("立即刷新")
         refresh_act.triggered.connect(self.refresh_requested.emit)
 
-        fun = menu.addMenu("🐾  互动")
-        fun.addAction("✋  摸摸头", lambda: self.react("pet", self.revive_text))
-        fun.addAction("👋  打个招呼", lambda: self.react(self._greet_clip(), self.revive_text))
-        fun.addAction("🍱  快端上来罢（启动记录）", self.show_trophy)
-        desk = fun.addAction("💻  底栏办公桌模式")
+        fun = menu.addMenu("互动")
+        fun.addAction("摸摸头", lambda: self.react("pet", self.revive_text))
+        fun.addAction("打个招呼", self.say_hi)
+        fun.addAction("快端上来罢（启动记录）", self.show_trophy)
+        desk = fun.addAction("底栏办公桌模式")
         desk.setCheckable(True)
         desk.setChecked(self._desk)
         desk.triggered.connect(self.toggle_desk)
 
-        music = menu.addMenu("🎵  听音乐模式")
-        train = music.addAction("✏️  训练 10 秒 · 学你的敲击")
+        music = menu.addMenu("听音乐模式")
+        train = music.addAction("训练 10 秒（学你的敲击）")
         train.triggered.connect(self.start_training)
         music.addSeparator()
         music_group = QActionGroup(music)
@@ -1412,20 +1485,20 @@ class PetWidget(QWidget):
             act.triggered.connect(lambda _checked, m=mode: self.set_music_mode(m))
             music.addAction(act)
 
-        cfg = menu.addMenu("⚙️  设置")
-        motion = cfg.addAction("✨  动画与互动动作")
+        cfg = menu.addMenu("设置")
+        motion = cfg.addAction("动画与互动动作")
         motion.setCheckable(True)
         motion.setChecked(self._animate)
         motion.triggered.connect(self.toggle_motion)
-        watch = cfg.addAction("🚀  新应用启动提醒")
+        watch = cfg.addAction("新应用启动提醒")
         watch.setCheckable(True)
         watch.setChecked(self._watch_apps)
         watch.triggered.connect(self.toggle_watch_apps)
-        autostart = cfg.addAction("🔌  开机自启")
+        autostart = cfg.addAction("开机自启")
         autostart.setCheckable(True)
         autostart.setChecked(autostart_enabled())
         autostart.triggered.connect(set_autostart)
-        size = cfg.addMenu("📐  桌宠大小")
+        size = cfg.addMenu("桌宠大小")
         size_group = QActionGroup(size)
         size_group.setExclusive(True)
         current_h = self.settings.value("height", 210, type=int)
@@ -1436,7 +1509,7 @@ class PetWidget(QWidget):
             size_group.addAction(act)
             act.triggered.connect(lambda _checked, h=height: self.resize_pet(h))
             size.addAction(act)
-        glass = cfg.addMenu("🧊  看板毛玻璃")
+        glass = cfg.addMenu("看板毛玻璃")
         glass_group = QActionGroup(glass)
         glass_group.setExclusive(True)
         for value, text in ((0, "不透明"), (25, "25% 透明"), (45, "45% 透明"),
@@ -1447,10 +1520,10 @@ class PetWidget(QWidget):
             glass_group.addAction(act)
             act.triggered.connect(lambda _checked, v=value: self.set_panel_glass(v))
             glass.addAction(act)
-        role = cfg.addMenu("🎭  角色")
+        role = cfg.addMenu("角色")
         role_group = QActionGroup(role)
         role_group.setExclusive(True)
-        for cid, text in (("owl", "奥尔 · 猫头鹰娘"), ("sunflower", "向日葵")):
+        for cid, text in (("owl", "奥尔（猫头鹰娘）"), ("sunflower", "向日葵")):
             act = QAction(text, role)
             act.setCheckable(True)
             act.setChecked(self.character == cid)
@@ -1459,7 +1532,10 @@ class PetWidget(QWidget):
             role.addAction(act)
 
         menu.addSeparator()
-        quit_act = menu.addAction("🚪  退出 Rockabuddy")
+        quit_act = menu.addAction("退出")
+        bold = quit_act.font()
+        bold.setBold(True)
+        quit_act.setFont(bold)
         quit_act.triggered.connect(QApplication.quit)
         menu.exec(event.globalPos())
 

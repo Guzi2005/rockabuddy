@@ -53,13 +53,83 @@ def load_env(path):
 load_env(paths.data_path(".env"))
 
 
-def single_instance_lock():
-    """命名互斥量防多开: 重复启动时托盘会出现两份、轮询翻倍。返回是否拿到锁。"""
-    if sys.platform != "win32":
+def _pid_alive(pid):
+    """Windows 下判断进程是否还活着(用于清理死锁文件)。"""
+    if sys.platform != "win32" or not pid:
+        return False
+    try:
+        kernel32 = ctypes.windll.kernel32
+        h = kernel32.OpenProcess(0x0400, False, int(pid))  # PROCESS_QUERY_INFORMATION
+        if not h:
+            return False
+        kernel32.CloseHandle(h)
         return True
-    import ctypes
-    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\Rockabuddy")
-    return ctypes.windll.kernel32.GetLastError() != 183   # ERROR_ALREADY_EXISTS
+    except Exception:
+        return False
+
+
+LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tokenspy_lock")
+
+
+def acquire_lock():
+    """基于 PID 文件防多开。返回 (是否拿到锁, 已存在实例的 pid 或 None)。
+    若锁文件指向的进程已死, 视为死锁自动清理后重新拿锁。"""
+    if sys.platform != "win32":
+        return True, None
+    if os.path.exists(LOCK_PATH):
+        old = None
+        try:
+            with open(LOCK_PATH, encoding="utf-8") as f:
+                old = int(f.read().strip())
+        except (OSError, ValueError):
+            old = None
+        if old == os.getpid():
+            return True, None          # 本进程已持有锁
+        if old and _pid_alive(old):
+            return False, old
+        try:
+            os.remove(LOCK_PATH)
+        except OSError:
+            pass
+    try:
+        with open(LOCK_PATH, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
+    return True, None
+
+
+def release_lock():
+    try:
+        if os.path.exists(LOCK_PATH):
+            os.remove(LOCK_PATH)
+    except OSError:
+        pass
+
+
+def _bring_to_front(pid):
+    """把已运行实例的主窗口提到最前(双击重复启动时复用现有实例)。"""
+    try:
+        user32 = ctypes.windll.user32
+        found = []
+
+        def enum(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            pid_buf = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_buf))
+            if pid_buf.value == pid:
+                found.append(hwnd)
+            return True
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        user32.EnumWindows(WNDENUMPROC(enum), 0)
+        for hwnd in found:
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        if found:
+            user32.SetForegroundWindow(found[0])
+    except Exception:
+        pass
 
 def load_config():
     try:
@@ -495,9 +565,24 @@ class App(QObject):
 
 
 if __name__ == "__main__":
-    if not single_instance_lock():
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(
-            None, "Rockabuddy 已经在运行啦（去托盘找找）", "Rockabuddy", 0x40)
-        sys.exit(0)
-    App().run()
+    we_own_lock = False
+    try:
+        if sys.platform == "win32":
+            ok, old_pid = acquire_lock()
+            if not ok:
+                _bring_to_front(old_pid)      # 已有实例: 提到最前, 不再弹框后退出
+                sys.exit(0)
+            we_own_lock = True
+        App().run()
+    except Exception:
+        import traceback
+        crash = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crash.log")
+        try:
+            with open(crash, "w", encoding="utf-8") as f:
+                f.write(traceback.format_exc())
+        except OSError:
+            pass
+        raise
+    finally:
+        if we_own_lock:
+            release_lock()

@@ -88,6 +88,9 @@ class ZcodeTests(unittest.TestCase):
         con.close()
         self._old_env = os.environ.get("ZCODE_DB")
         os.environ["ZCODE_DB"] = self.db
+        # 隔离订阅档位读取: 指向不存在的设置文件, 测试不依赖本机订阅
+        self._old_settings = os.environ.get("ZCODE_SETTINGS")
+        os.environ["ZCODE_SETTINGS"] = os.path.join(self.tmp.name, "setting.missing.json")
         self.addCleanup(self._restore_env)
 
     def _restore_env(self):
@@ -95,6 +98,10 @@ class ZcodeTests(unittest.TestCase):
             os.environ.pop("ZCODE_DB", None)
         else:
             os.environ["ZCODE_DB"] = self._old_env
+        if self._old_settings is None:
+            os.environ.pop("ZCODE_SETTINGS", None)
+        else:
+            os.environ["ZCODE_SETTINGS"] = self._old_settings
 
     def test_without_budget_counts_today_completed_only(self):
         data = providers.fetch_zcode({})
@@ -124,8 +131,22 @@ class ZcodeTests(unittest.TestCase):
     def test_dispatched_by_fetch_one(self):
         data = providers.fetch_one({"id": "zcode", "type": "zcode"})
         self.assertTrue(data["ok"])
-        self.assertEqual(data["source"], "ZCode 本地会话库")
+        self.assertTrue(data["source"].startswith("ZCode 本地会话库"))
         self.assertIn("fetched_at", data)
+
+    def test_plan_label_from_settings(self):
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+        tmp.write('{"providerFamilyConnectionSelections":{"zai":{"kind":"individual-coding-plan"}}}')
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        old = os.environ.get("ZCODE_SETTINGS")
+        os.environ["ZCODE_SETTINGS"] = tmp.name
+        self.addCleanup(lambda: os.environ.pop("ZCODE_SETTINGS", None) if old is None
+                        else os.environ.__setitem__("ZCODE_SETTINGS", old))
+        self.assertEqual(providers._zcode_plan_label(), "个人 Coding Plan")
+        os.environ["ZCODE_SETTINGS"] = tmp.name + ".missing"
+        self.assertEqual(providers._zcode_plan_label(), "")
 
 
 if __name__ == "__main__":

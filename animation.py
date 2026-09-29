@@ -9,9 +9,12 @@ from PySide6.QtGui import QImage, QPainter, QPixmap, QBitmap, QRegion
 CLIPS = {
     "blink": [(0, .04), (1, .05), (2, .10), (3, .05), (0, .07)],
     # 注意到你:  idle -> 前倾察觉 -> 回正过渡 -> 睁大眼 -> 歪头好奇 -> 笑意渐起 -> 眯眼开心 -> 停在悬停帧
-    "greet": [(0, .06), (15, .10), (30, .09), (4, .12), (6, .16), (31, .10), (5, .30), (4, .12)],
-    # 招手: 抬手 → 招两下(17 举手 / 8 收半) → 眯眼笑收尾
+    # 打招呼(上半程): 悬停时定格在 6 号"握拳托下巴"姿势, 离开才播 greet_out 下半程
+    "greet": [(0, .06), (15, .10), (30, .09), (4, .12), (6, .18)],
+    "greet_out": [(31, .14), (5, .30), (4, .16), (0, .12)],
+    # 招手(上半程): 定格在 17 号举手, 离开播 wave_out 放下手
     "wave": [(0, .08), (17, .22), (8, .16), (17, .24), (8, .16), (17, .28), (18, .26), (4, .12)],
+    "wave_out": [(18, .22), (4, .14), (0, .10)],
     "pet": [(4, .08), (18, .10), (5, .42), (4, .14)],
     "land": [(16, .07), (1, .06), (0, .16)],
     # 猫式抖耳: 半压耳过渡 -> 双耳压下 -> 单耳一抖 -> 压回 -> 半压回弹 -> 松开
@@ -29,6 +32,9 @@ CLIPS = {
     "stretch": [(25, .14), (34, .11), (35, .38), (26, .60),
                 (35, .11), (34, .11), (25, .15), (0, .24)],
 }
+
+# 这些剪辑走 smoothstep 倍速曲线: 起手与收尾慢、中间快, 动作更灵动丝滑
+EASE_CLIPS = {"greet", "greet_out", "wave", "wave_out", "pet", "stretch", "launch"}
 
 FADE = 0  # 帧切换不做交叉淡化: 密集帧序列下反复重开淡化会一直半透明闪白, 硬切更干净
 
@@ -60,6 +66,9 @@ class SpritePlayer:
         self._fade_strength = 1.0  # 被打断时旧帧的实际可见度, 从此处继续淡出(防闪烁)
         self.hold_frame = None   # 剪辑播完后定格的帧(举图标姿势)
         self.hold_until = 0.0
+        self.hold_next = None    # 定格结束后自动接力的剪辑(打招呼收尾等)
+        self.hold_kind = None    # 定格来源剪辑名(greet/wave/launch)
+        self.hold_next = None    # 定格结束后自动接力的剪辑(打招呼收尾等)
         self.rocking = False     # 音乐节拍摇摆中(循环 ROCK_CYCLE)
         self.rock_period = 0.5   # 拍长秒, 由 BeatListener 连续更新
         self.rock_anchor = 0.0   # 循环相位起点
@@ -79,6 +88,7 @@ class SpritePlayer:
         self.talking = False
         self.opera = False
         self.dozing = False
+        self.hold_next = None
         self._fade_from = None
         self._fade_strength = 1.0
         self.frame_index = 0
@@ -215,9 +225,22 @@ class SpritePlayer:
             index = self._dizzy_frame(now)
             self._set(index, now)
             return index
+        # 定格到期: 在剪辑处理前拦截, 接力 hold_next(打招呼收尾等)
+        if self.hold_frame is not None and now >= self.hold_until:
+            self.hold_frame = None
+            if self.hold_next:
+                nxt, self.hold_next = self.hold_next, None
+                self.play(nxt, now)
         if self.clip != "idle":
+            seq = CLIPS[self.clip]
             elapsed = now - self.started
-            for index, duration in CLIPS[self.clip]:
+            if self.clip in EASE_CLIPS:
+                # 倍速曲线: smoothstep 重映射时间轴, 起手/收尾慢、中间快
+                total = sum(d for _i, d in seq)
+                if total > 0:
+                    p = max(0.0, min(1.0, elapsed / total))
+                    elapsed = (p * p * (3 - 2 * p)) * total
+            for index, duration in seq:
                 if elapsed < duration:
                     index = index % len(self.frames) if self.frames else index
                     # 剪辑内的帧步进: 帧够长才淡入, 快帧硬切(眨眼这类快速序列硬切更利落)
@@ -227,7 +250,7 @@ class SpritePlayer:
             finished, self.clip = self.clip, "idle"
             self._after_clip(finished, now)
         if self.hold_frame is not None and now < self.hold_until:
-            # 定格(如举图标): 期间不眨眼不抖耳
+            # 定格(如举图标/悬停托下巴): 期间不眨眼不抖耳
             index = self.hold_frame % len(self.frames) if self.frames else self.hold_frame
             self._set(index, now)
             return index

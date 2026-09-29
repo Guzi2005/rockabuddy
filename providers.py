@@ -312,6 +312,31 @@ def fetch_kimi_coding(cfg):
 
 
 # ---------------- ZCode(读本机会话库, 统计实际 token 消耗) ----------------
+ZCODE_PLAN_LABELS = {
+    "individual-coding-plan": "个人 Coding Plan",
+    "pro": "Pro", "max": "Max", "team": "团队版", "enterprise": "企业版",
+}
+
+
+def _zcode_settings_path():
+    override = os.environ.get("ZCODE_SETTINGS", "").strip()
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".zcode", "v2", "setting.json")
+
+
+def _zcode_plan_label():
+    """读 ZCode 设置里当前连接的订阅档位(没有则空串)。"""
+    try:
+        with open(_zcode_settings_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        kind = (((data.get("providerFamilyConnectionSelections") or {})
+                 .get("zai") or {}).get("kind") or "")
+        return ZCODE_PLAN_LABELS.get(kind, kind)
+    except (OSError, ValueError):
+        return ""
+
+
 def _zcode_db_path():
     override = os.environ.get("ZCODE_DB", "").strip()
     if override:
@@ -371,10 +396,24 @@ def fetch_zcode(cfg):
     requests = sum(int(r[1] or 0) for r in rows)
     notes = ["%s %s" % (r[0], _fmt_tokens(int(r[2] or 0))) for r in rows[:3]]
     notes.append("%d 次请求" % requests)
+    plan = _zcode_plan_label()
+    # 订阅档位来自 ~/.zcode/v2/setting.json; 30 天累计顺带汇报, 补足"没有配额接口"的体感
+    month_note = ""
+    try:
+        month_rows = _zcode_query(
+            "SELECT SUM(computed_total_tokens), COUNT(DISTINCT date(started_at/1000, 'unixepoch', 'localtime')) "
+            "FROM model_usage WHERE status='completed' AND started_at >= ?",
+            (int((midnight - 29 * 86400) * 1000),))
+        month_used = int(month_rows[0][0] or 0)
+        month_days = int(month_rows[0][1] or 0)
+        if month_used > 0:
+            month_note = " · 30天 %s(%d 天用)" % (_fmt_tokens(month_used), month_days)
+    except Exception:  # noqa: BLE001
+        pass
     budget = cfg.get("daily_budget_tokens")
     result = {"ok": True, "unit": "万tok", "error": None,
-              "source": "ZCode 本地会话库",
-              "note": "今日 · " + " · ".join(notes)}
+              "source": "ZCode 本地会话库" + (" · " + plan if plan else ""),
+              "note": ("[%s] " % plan if plan else "") + "今日 · " + " · ".join(notes) + month_note}
     if budget:
         try:
             budget = float(budget)
@@ -409,6 +448,79 @@ def fetch_manual(cfg):
     }
 
 
+# ---------------- WorkBuddy 免费模型清单(本地策略表, 不联网) ----------------
+def _parse_dt(text):
+    """'2026-09-30T23:59' / '2026-09-30 23:59' / 纯日期 -> 本地 epoch 秒; 解析不出返回 None。"""
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M",
+                "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return time.mktime(time.strptime(str(text), fmt))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _in_night_window(window, now=None):
+    """window: 'HH:MM-HH:MM' 跨午夜, 如 '23:00-08:00'。当前处于该时段返回 True。"""
+    now = time.time() if now is None else now
+    try:
+        start_s, end_s = str(window).split("-")
+        sh, sm = (int(x) for x in start_s.split(":"))
+        eh, em = (int(x) for x in end_s.split(":"))
+    except (ValueError, AttributeError):
+        return False
+    cur = time.localtime(now)
+    cur_min = cur.tm_hour * 60 + cur.tm_min
+    start_min, end_min = sh * 60 + sm, eh * 60 + em
+    if start_min <= end_min:                 # 同日时段(不跨午夜)
+        return start_min <= cur_min < end_min
+    return cur_min >= start_min or cur_min < end_min   # 跨午夜
+
+
+def _free_status(m, now=None):
+    """返回 (当前是否免费, 文案, 底, 字) 四元组, 供面板实时着色。"""
+    now = time.time() if now is None else now
+    kind = m.get("kind")
+    if kind == "night":
+        if _in_night_window(m.get("window", "23:00-08:00"), now):
+            return True, "夜间免费中", "#e3f2ec", "#2e7d6b"
+        return False, "夜间 %s 起" % m.get("window", "23:00-08:00"), "#eef0ea", "#788784"
+    if kind == "limited":
+        until = _parse_dt(m.get("until"))
+        if until is None:
+            return False, "未知时段", "#eef0ea", "#788784"
+        if now <= until:
+            return True, "限免中", "#e3f2ec", "#2e7d6b"
+        return False, "已过期", "#e9eae6", "#98a09a"
+    return False, "—", "#eef0ea", "#788784"
+
+
+def fetch_workbuddy_free(cfg):
+    """WorkBuddy 免费模型清单: 读 config 里的 free_models 规则, 按当前时间算出
+    「此刻哪些免费」。免费政策由运营公告决定、频繁变动, 故用本地策略表维护,
+    而不是去拉不存在的公开接口。"""
+    models = [dict(m) for m in (cfg.get("free_models") or [])]
+    now = time.time()
+    free_count = 0
+    for m in models:
+        free_now = _free_status(m, now)[0]
+        m["free_now"] = free_now
+        if free_now:
+            free_count += 1
+    return {
+        "ok": True,
+        "free_models": models,
+        "free_count": free_count,
+        "free_total": len(models),
+        "unit": "",
+        "note": "策略表维护 · 政策变动改 config 一处",
+        "source": "本地策略表",
+        "error": None,
+    }
+
+
 ADAPTERS = {
     "cursor": fetch_cursor,
     "siliconflow": fetch_siliconflow,
@@ -417,6 +529,7 @@ ADAPTERS = {
     "kimi_coding": fetch_kimi_coding,
     "zcode": fetch_zcode,
     "manual": fetch_manual,
+    "workbuddy_free": fetch_workbuddy_free,
 }
 
 

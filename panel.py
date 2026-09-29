@@ -3,14 +3,15 @@ import ctypes
 import math
 import os
 import time
-from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QTimer, Signal
+from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QTimer, Signal, QSettings
 from PySide6.QtGui import (QColor, QLinearGradient, QPainter, QPainterPath, QPen,
-                           QPixmap, QImage)
+                           QPixmap, QImage, QBitmap)
 from PySide6.QtWidgets import (QWidget, QFrame, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QDialog, QLineEdit, QSizePolicy, QApplication, QScrollArea,
     QScrollBar)
 import paths
 from credentials import save_secret
+from providers import _free_status
 
 ICON_DIR = paths.resource_path("assets", "icons")
 
@@ -250,11 +251,11 @@ def burn_rate(pts, now=None):
 
 
 class Sparkline(QWidget):
-    """24h 剩余比例迷你趋势: 折线 + 渐变填充 + 末端亮点。"""
+    """剩余比例迷你趋势: 折线 + 渐变填充 + 末端亮点。"""
 
     def __init__(self, pts, color="#5fae9f", parent=None):
         super().__init__(parent)
-        self.setFixedSize(66, 20)
+        self.setFixedSize(74, 22)
         now = pts[-1][0] if pts else time.time()
         self._pts = [(max(0.0, (ts - (now - 24 * 3600)) / (24 * 3600.0)), pct)
                      for ts, pct in pts]
@@ -365,6 +366,38 @@ def _set_window_acrylic(hwnd, tint_abgr):
         return False
 
 
+def _apply_backdrop(hwnd, transparency):
+    """看板毛玻璃: Win11 用 DWM 系统背景(丙烯酸=TRANSIENTWINDOW),
+    旧系统回退到 ACCENT_ACRYLIC。transparency=0 关闭。失败静默。"""
+    if os.name != "nt" or not hwnd:
+        return
+    if transparency <= 0:
+        # 关闭: 关掉 DWM 背景, 也清掉可能残留的亚克力合成属性
+        try:
+            off = ctypes.c_int(1)  # DWMSBT_NONE
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(int(hwnd)), 38, ctypes.byref(off), 4)
+        except Exception:
+            pass
+        _set_window_acrylic(hwnd, None)
+        return
+    # Win11: 先开宿主背景刷, 再指定丙烯酸背景类型(否则丙烯酸常常不显示)
+    try:
+        enable = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(int(hwnd)), 16, ctypes.byref(enable), 4)
+        acrylic = ctypes.c_int(3)  # DWMSBT_TRANSIENTWINDOW
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(int(hwnd)), 38, ctypes.byref(acrylic), 4)
+        return
+    except Exception:
+        pass
+    # Win10 回退: 亚克力合成属性
+    alpha = round(255 * (1 - transparency / 100.0))
+    tint = (alpha << 24) | (0xF0 << 16) | (0xF4 << 8) | 0xF4  # #f4f4f0 → ABGR
+    _set_window_acrylic(hwnd, tint)
+
+
 def _hole_path(parent_w):
     """挂牌胶囊挂孔: 顶部中央, 真透明穿透窗口。"""
     hole = QPainterPath()
@@ -382,10 +415,10 @@ class HeaderBlock(QWidget):
         w, h = self.width(), self.height()
         path = QPainterPath()
         path.moveTo(0, h)
-        path.lineTo(0, 16)
-        path.quadTo(0, 0, 16, 0)
-        path.lineTo(w - 16, 0)
-        path.quadTo(w, 0, w, 16)
+        path.lineTo(0, 18)
+        path.quadTo(0, 0, 18, 0)
+        path.lineTo(w - 18, 0)
+        path.quadTo(w, 0, w, 18)
         path.lineTo(w, h)
         path.closeSubpath()
         p.setPen(Qt.NoPen)
@@ -402,6 +435,7 @@ class PanelSurface(QFrame):
     def __init__(self):
         super().__init__()
         self.glass = False
+        self.glass_alpha = 255
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -410,7 +444,10 @@ class PanelSurface(QFrame):
         body = QPainterPath()
         body.addRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 18, 18)
         body = body.subtracted(_hole_path(w))
-        if not self.glass:
+        if self.glass:
+            # 毛玻璃: 透出 DWM/亚克力背景, 叠一层半透明白雾控制雾化浓度
+            p.fillPath(body, QColor(244, 244, 240, self.glass_alpha))
+        else:
             p.fillPath(body, QColor("#f4f4f0"))
         p.setPen(QPen(QColor("#d9dcd2"), 1))
         p.setBrush(Qt.NoBrush)
@@ -431,6 +468,7 @@ class UsageCard(QFrame):
         self.cfg, self.data = cfg, data
         self.baseline = baseline   # 今日零点前最后一次同步到的服务剩余%(分不出就 None)
         self.countdowns = []
+        self.free_rows = []         # 免费模型卡的 (色点, 状态标签, 规则) 行
         if emphasized:
             self.setObjectName("cardLive")
         root = QVBoxLayout(self)
@@ -442,6 +480,12 @@ class UsageCard(QFrame):
         drained = (data.get("ok") and not data.get("stale")
                    and pct is not None and pct <= 0.5)
         kind = cfg.get("type")
+
+        # 免费模型清单卡: 直接渲染策略表, 不走主值/窗口条逻辑
+        if data.get("free_models") is not None:
+            self._render_free(data, color)
+            self.tick()
+            return
 
         # ---- 行 1: 图标 名称 徽章 …… 大号主值 ----
         top = QHBoxLayout()
@@ -511,13 +555,12 @@ class UsageCard(QFrame):
             top.addWidget(label("待连接", "muted"))
         root.addLayout(top)
 
-        # ---- 行 2: 动态行 —— 24h 趋势 · 燃烧速率 · 倒计时 · 操作按钮 ----
+        # ---- 行 2: 动态行 —— 趋势 · 燃烧速率 · 倒计时 · 操作按钮 ----
         series = series or []
         dyn = QHBoxLayout()
-        dyn.setSpacing(7)
+        dyn.setSpacing(8)
         if len(series) >= 2 and pct is not None:
             dyn.addWidget(Sparkline(series, SEG_REMAIN))
-            dyn.addWidget(label("24h", "muted"))
         rate = burn_rate(series) if len(series) >= 2 else None
         if rate is not None and abs(rate) >= 0.15:
             if rate > 0:
@@ -528,8 +571,6 @@ class UsageCard(QFrame):
                 chip = label("↑ %.1f%%/h" % (-rate))
                 chip.setStyleSheet("font-size:11px;font-weight:800;color:#5fae9f;")
             dyn.addWidget(chip)
-        elif rate is not None:
-            dyn.addWidget(label("→ 平稳", "muted"))
         dyn.addStretch()
         if resets:
             self._cd = label("")
@@ -603,6 +644,64 @@ class UsageCard(QFrame):
         for widget, timestamp in self.countdowns:
             text, due = countdown_parts(timestamp)
             widget.setText(("已到期 · 待同步" if due else "%s后" % text))
+        if getattr(self, "free_rows", None):
+            self._refresh_free_status()
+
+    def _render_free(self, data, color):
+        """免费模型清单: 列出限免/夜间免费模型, 实时标注当前是否免费。"""
+        lay = self.layout()
+        models = data.get("free_models") or []
+        count = data.get("free_count", 0)
+        total = data.get("free_total", len(models))
+        top = QHBoxLayout()
+        top.setSpacing(5)
+        top.addWidget(icon_widget(self.cfg["id"], color, 22))
+        name = label(self.cfg.get("name", "?"))
+        name.setStyleSheet("font-weight:700;font-size:12px;")
+        top.addWidget(name)
+        badge = label("%d/%d 免费" % (count, total))
+        badge.setStyleSheet("background:#e3f2ec;color:#2e7d6b;border-radius:6px;"
+                            "padding:0px 4px;font-size:9px;")
+        badge.setFixedHeight(16)
+        top.addWidget(badge, 0, Qt.AlignVCenter)
+        top.addStretch()
+        self.free_headline = label("当前 %d 免费" % count)
+        self.free_headline.setStyleSheet("font-size:14px;font-weight:800;color:#1d2a2b;")
+        top.addWidget(self.free_headline)
+        lay.addLayout(top)
+        for m in models:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            dot = QFrame()
+            dot.setFixedSize(8, 8)
+            row.addWidget(dot)
+            mname = label(m.get("name", "?"))
+            mname.setStyleSheet("font-size:11px;font-weight:600;")
+            row.addWidget(mname, 1)
+            status = label("")
+            status.setFixedHeight(16)
+            row.addWidget(status)
+            lay.addLayout(row)
+            self.free_rows.append((dot, status, m))
+        self._refresh_free_status()
+        self.setToolTip(data.get("note", "") or "")
+
+    def _refresh_free_status(self):
+        """按当前时间重算每个模型的免费状态(夜间时段/限免截止), 实时更新着色。"""
+        if not self.free_rows:
+            return
+        now = time.time()
+        count = 0
+        for dot, status, m in self.free_rows:
+            free_now, text, bg, fg = _free_status(m, now)
+            if free_now:
+                count += 1
+            dot.setStyleSheet("background:%s;border-radius:4px;" % fg)
+            status.setText(text)
+            status.setStyleSheet("background:%s;color:%s;border-radius:6px;"
+                                "padding:0px 5px;font-size:9px;" % (bg, fg))
+        if getattr(self, "free_headline", None) is not None:
+            self.free_headline.setText("当前 %d 免费" % count)
 
     def configure(self):
         if self.cfg.get("type") == "manual":
@@ -634,6 +733,8 @@ class Dashboard(QWidget):
         self.cards = []
         self._hero_reset = None
         self._hero_pid = None
+        self._settings = QSettings("Rockabuddy", "Dashboard")
+        self._collapsed = self._settings.value("panel_collapsed", False, type=bool)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         surface = PanelSurface()
@@ -664,6 +765,13 @@ class Dashboard(QWidget):
         spacer.setFixedSize(HOLE_W + 12, HOLE_H)
         rowa.addWidget(spacer)
         rowa.addStretch(1)
+        self.btn_collapse = QPushButton("仅可用")
+        self.btn_collapse.setObjectName("ghost")
+        self.btn_collapse.setFixedHeight(22)
+        self.btn_collapse.setToolTip("精简模式：只显示可用的 AI 服务")
+        self.btn_collapse.clicked.connect(self.toggle_collapse)
+        rowa.addWidget(self.btn_collapse)
+        self.update_collapse_label()
         self.btn_refresh = QPushButton("⟳ 刷新")
         self.btn_refresh.setObjectName("ghost")
         self.btn_refresh.setFixedHeight(22)
@@ -738,12 +846,30 @@ class Dashboard(QWidget):
         self.timer.start(1000)
         self._fit_height()
 
+    def _update_mask(self):
+        """窗口真实裁剪: 圆角矩形挖穿孔, 孔与边角从窗口里被切掉(真正透明),
+        不被毛玻璃底衬填满。尺寸变化时需重算。"""
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return
+        mask = QBitmap(w, h)
+        p = QPainter(mask)
+        p.setBrush(Qt.color1)
+        p.setPen(Qt.color1)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, w, h), 18, 18)
+        path = path.subtracted(_hole_path(w))
+        p.fillPath(path, Qt.color1)
+        p.end()
+        self.setMask(mask)
+
     def _fit_height(self):
         """固定宽 320; 高度按内容, 超过屏幕可用高度就收进屏幕(内容转内部滚动)。"""
         content = HEADER_H + self._body.sizeHint().height() + 2
         scr = QApplication.primaryScreen().availableGeometry()
         self.setFixedWidth(320)
         self.setFixedHeight(min(content, int(scr.height() * .92)))
+        self._update_mask()
 
     def reposition_for(self, pet):
         """贴着桌宠选位: 左/右/上/下, 钳进屏幕可用区且不遮桌宠;
@@ -754,6 +880,7 @@ class Dashboard(QWidget):
         content = HEADER_H + self._body.sizeHint().height() + 2
         self.setFixedWidth(320)
         self.setFixedHeight(min(content, int(scr.height() * .92)))
+        self._update_mask()
         bw, bh, gap = self.width(), self.height(), 10
         candidates = [
             (petg.left() - gap - bw, petg.center().y() - bh // 2),   # 左
@@ -779,21 +906,20 @@ class Dashboard(QWidget):
         self.move(best.topLeft())
 
     def apply_glass(self, transparency):
-        """看板毛玻璃透明度: 0=不透明关闭, 其余为透过比例(1-90)。"""
-        transparency = max(0, min(90, int(transparency)))
+        """看板毛玻璃透明度: 0=不透明关闭, 其余为透过比例(1-85)。"""
+        transparency = max(0, min(85, int(transparency)))
         self._glass = transparency
         self._surface.glass = transparency > 0
+        # 透过比例越大(alpha 越小)越通透, 但留个下限保证文字可读
+        self._surface.glass_alpha = max(60, round(255 * (1 - transparency / 100.0)))
         self._surface.update()
-        if transparency <= 0:
-            _set_window_acrylic(self.winId(), None)
-        else:
-            alpha = round(255 * (1 - transparency / 100.0))
-            tint = (alpha << 24) | (0xF0 << 16) | (0xF4 << 8) | 0xF4   # #f4f4f0 → ABGR
-            _set_window_acrylic(self.winId(), tint)
+        hwnd = self.winId()
+        _apply_backdrop(hwnd, transparency)
         self.update()
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._update_mask()                 # 窗口句柄重建后重投裁剪遮罩
         if self._glass > 0:
             self.apply_glass(self._glass)   # 窗口句柄可能被重建, 重投一次
 
@@ -809,6 +935,50 @@ class Dashboard(QWidget):
     def set_sync_info(self, text):
         self.footer.setText(text)
 
+    def _is_usable(self, cfg):
+        """在线且未耗尽: 精简模式下只展示这类卡片。"""
+        d = self.results.get(cfg["id"], {})
+        if not d.get("ok") or d.get("stale"):
+            return False
+        p = service_pct(d)
+        return p is None or p > 0.5
+
+    def _empty_state(self):
+        """没有卡片可展示时的占位(精简态无可用服务 / 还没配置服务)。"""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(14, 22, 14, 22)
+        lay.setSpacing(6)
+        if self._collapsed:
+            t1, t2 = "没有可用的 AI 服务", "点「全部」展开查看所有"
+        else:
+            t1, t2 = "还没有添加任何服务", "在 config.json 的 providers 里加上"
+        a = label(t1, "muted")
+        a.setStyleSheet("font-size:13px;font-weight:700;color:#788784;")
+        a.setAlignment(Qt.AlignCenter)
+        b = label(t2, "mutedLight")
+        b.setAlignment(Qt.AlignCenter)
+        lay.addWidget(a)
+        lay.addWidget(b)
+        return box
+
+    def update_collapse_label(self):
+        # 按钮直接显示当前态: 收缩时高亮「仅可用」, 展开时普通「全部」
+        if self._collapsed:
+            self.btn_collapse.setText("仅可用")
+            self.btn_collapse.setStyleSheet(
+                "background:#5fae9f;color:#0f1a1a;border-radius:8px;"
+                "padding:5px 10px;font-weight:700;")
+        else:
+            self.btn_collapse.setText("全部")
+            self.btn_collapse.setStyleSheet("")
+
+    def toggle_collapse(self):
+        self._collapsed = not self._collapsed
+        self._settings.setValue("panel_collapsed", self._collapsed)
+        self.update_collapse_label()
+        self.rebuild()
+
     def _day_baseline(self, pid, midnight):
         """该服务今日零点前最后一次记录的剩余%(history 按时间追加, 取最后一个)。"""
         base = None
@@ -820,7 +990,10 @@ class Dashboard(QWidget):
     def _pick_hero(self):
         """下次复活 = 所有窗口里最近的重置点; 没有则退到余量最低的服务。"""
         best = None
-        for cfg in self.cfg.get("providers", []):
+        providers = self.cfg.get("providers", [])
+        if self._collapsed:
+            providers = [c for c in providers if self._is_usable(c)]
+        for cfg in providers:
             data = self.results.get(cfg["id"], {})
             ts = next_reset(data)
             if ts and (best is None or ts < best[0]):
@@ -850,11 +1023,11 @@ class Dashboard(QWidget):
 
         def usable(cfg):
             """在线且未耗尽: 卡片强调置顶; 耗尽/失败/没数据的扁平沉底。"""
-            d = self.results.get(cfg["id"], {})
-            if not d.get("ok") or d.get("stale"):
-                return False
-            p = service_pct(d)
-            return p is None or p > 0.5
+            return self._is_usable(cfg)
+
+        if self._collapsed:
+            # 精简态: 丢弃不可用的 AI, 只保留可用卡片
+            providers = [c for c in providers if self._is_usable(c)]
 
         providers.sort(key=usable, reverse=True)   # 稳定排序: 组内保持配置顺序
         for index, cfg in enumerate(providers):
@@ -868,6 +1041,9 @@ class Dashboard(QWidget):
             card.activate.connect(self.provider_activated)
             self.items.addWidget(card)
             self.cards.append(card)
+
+        if not self.cards:
+            self.items.addWidget(self._empty_state())
 
         pick, is_lowest = self._pick_hero()
         if pick is None:

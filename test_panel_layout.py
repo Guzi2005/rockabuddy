@@ -5,6 +5,7 @@ from PySide6.QtCore import QRect, QRectF
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from panel import (Dashboard, UsageCard, SEG_REMAIN, SEG_TODAY, SEG_BEFORE,
                    provider_series, burn_rate)
+from providers import _free_status, _in_night_window
 from animation import SpritePlayer, SUNFLOWER_DANCE_FRAMES, SUNFLOWER_HOLD_FRAME
 from pet import PetWidget, ASSET
 import os
@@ -89,8 +90,8 @@ class CleanPanelTests(unittest.TestCase):
         board.show()
         qt.processEvents()
         spark=[w for w in board.cards[0].findChildren(QWidget)
-               if w.width()==66 and w.height()==20]
-        self.assertEqual(len(spark),1)   # 24h 趋势图就位
+               if w.width()==74 and w.height()==22]
+        self.assertEqual(len(spark),1)   # 趋势图就位
         board.close()
 
     def test_reposition_keeps_panel_on_screen_clear_of_pet(self):
@@ -190,6 +191,35 @@ class CleanPanelTests(unittest.TestCase):
         QTest.mouseClick(icon, Qt.LeftButton, pos=QPoint(5,5))
         self.assertEqual(got,['zcode'])
         board.close()
+
+
+    def test_workbuddy_free_model_list_renders(self):
+        cfg={'providers':[{'id':'workbuddy','name':'WorkBuddy','type':'workbuddy_free',
+                           'free_models':[
+                               {'name':'混元 Hy3','kind':'limited','until':'2099-01-01T00:00'},
+                               {'name':'夜间模型','kind':'night','window':'00:00-23:59'}]}]}
+        data={'workbuddy':{'ok':True,'free_models':[
+                               {'name':'混元 Hy3','kind':'limited','until':'2099-01-01T00:00','free_now':True},
+                               {'name':'夜间模型','kind':'night','window':'00:00-23:59','free_now':True}],
+                           'free_count':2,'free_total':2,'source':'本地策略表'}}
+        board=Dashboard()
+        board.set_data(cfg,data)
+        board.show()
+        qt.processEvents()
+        card=board.cards[0]
+        self.assertEqual(len(card.free_rows),2)
+        self.assertEqual(card.free_headline.text(),"当前 2 免费")
+        # 限免/夜间免费中应被标绿(底色 e3f2ec)
+        self.assertIn("e3f2ec", card.free_rows[0][1].styleSheet())
+        board.close()
+
+    def test_free_status_helper(self):
+        self.assertEqual(_free_status({'kind':'limited','until':'2099-01-01'})[0], True)
+        self.assertEqual(_free_status({'kind':'limited','until':'2000-01-01'})[1], "已过期")
+        t=time.mktime(time.strptime("2026-09-29 23:30","%Y-%m-%d %H:%M"))
+        self.assertTrue(_in_night_window("23:00-08:00", now=t))
+        noon=time.mktime(time.strptime("2026-09-29 12:00","%Y-%m-%d %H:%M"))
+        self.assertFalse(_in_night_window("23:00-08:00", now=noon))
 
 
 if __name__=='__main__':

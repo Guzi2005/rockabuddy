@@ -4,8 +4,8 @@ import math
 import os
 import time
 from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QTimer, Signal, QSettings
-from PySide6.QtGui import (QColor, QLinearGradient, QPainter, QPainterPath, QPen,
-                           QPixmap, QImage, QBitmap)
+from PySide6.QtGui import (QColor, QLinearGradient, QPainter, QPainterPath,
+                           QPainterPathStroker, QPen, QPixmap, QImage, QBitmap)
 from PySide6.QtWidgets import (QWidget, QFrame, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QDialog, QLineEdit, QSizePolicy, QApplication, QScrollArea,
     QScrollBar)
@@ -330,8 +330,10 @@ def seg_bar(segments, drained=False):
 
 
 # ---------------- 挂牌头部 + 毛玻璃 ----------------
-HOLE_W, HOLE_H, HOLE_Y = 110, 22, 8    # 顶部胶囊挂孔的几何
-HEADER_H = 94                          # 挂牌头总高(挂孔行 + 复活信息行)
+HOLE_W, HOLE_H, HOLE_Y = 96, 20, 10     # 顶部胶囊挂孔的几何
+HOLE_STRIP_H = 42                        # 孔条高度: 只有纸面与气眼, 不放别的
+PLATE_MX, PLATE_H = 6, 64                # 铭牌与左右边的留白 / 铭牌高
+HEADER_H = HOLE_STRIP_H + PLATE_H + 4    # 挂牌头总高(孔条 + 铭牌)
 
 ACCENT_DISABLED = 0
 ACCENT_ACRYLIC = 4
@@ -406,27 +408,42 @@ def _hole_path(parent_w):
     return hole
 
 
-class HeaderBlock(QWidget):
-    """深色挂牌头: 顶角圆 + 胶囊挂孔 + 复活信息, 替代原顶栏+英雄区两块黑。"""
+class HoleStrip(QWidget):
+    """孔条: 只有纸面挂孔 + 金属气眼圈, 别的什么都不放。"""
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        hole = _hole_path(self.width())
+        # 气眼(grommet): 外亮环 + 内深环 + 孔缘阴影, 像铆在纸上的金属圈
+        outer = QPainterPath(hole)
+        stroked = QPainterPathStroker()
+        stroked.setWidth(5)
+        ring_outer = stroked.createStroke(outer)
+        p.setPen(Qt.NoPen)
+        p.fillPath(ring_outer, QColor("#e7e9e0"))          # 亮圈(金属高光)
+        stroked.setWidth(2.2)
+        ring_inner = stroked.createStroke(outer)
+        p.fillPath(ring_inner, QColor("#b6bdb2"))          # 深圈(金属暗部)
+        stroked.setWidth(1.0)
+        rim = stroked.createStroke(outer)
+        p.fillPath(rim, QColor("#8f988c"))                 # 孔缘(阴影/厚度)
+
+
+class HeaderPlate(QWidget):
+    """铭牌: 贴在吊牌上的深色圆角信息牌(品牌行 + 复活信息), 不再挖孔。"""
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
-        path = QPainterPath()
-        path.moveTo(0, h)
-        path.lineTo(0, 18)
-        path.quadTo(0, 0, 18, 0)
-        path.lineTo(w - 18, 0)
-        path.quadTo(w, 0, w, 18)
-        path.lineTo(w, h)
-        path.closeSubpath()
+        plate = QPainterPath()
+        plate.addRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 12, 12)
         p.setPen(Qt.NoPen)
-        p.fillPath(path.subtracted(_hole_path(w)), QColor("#121b1d"))
-        # 孔缘一道浅描边, 有点厚度感
+        p.fillPath(plate, QColor("#121b1d"))
         p.setPen(QPen(QColor("#2c3a3c"), 1))
         p.setBrush(Qt.NoBrush)
-        p.drawPath(_hole_path(w))
+        p.drawPath(plate)
 
 
 class PanelSurface(QFrame):
@@ -739,54 +756,56 @@ class Dashboard(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ---- 挂牌头: 深色一体块, 顶部胶囊挂孔(真透明), 复活信息在下 ----
-        block = HeaderBlock()
-        block.setFixedHeight(HEADER_H)
-        block_root = QVBoxLayout(block)
-        block_root.setContentsMargins(0, 0, 0, 0)
-        block_root.setSpacing(0)
+        # ---- 挂牌头: 孔条(纸面+气眼)在上, 深色铭牌(品牌/按钮/复活)贴在下面 ----
+        strip = HoleStrip()
+        strip.setFixedHeight(HOLE_STRIP_H)
+        root.addWidget(strip)
+
+        plate_holder = QWidget()
+        plate_holder.setContentsMargins(PLATE_MX, 0, PLATE_MX, 4)
+        plate_lay = QVBoxLayout(plate_holder)
+        plate_lay.setContentsMargins(0, 0, 0, 0)
+        plate = HeaderPlate()
+        plate.setFixedHeight(PLATE_H)
+        plate_root = QVBoxLayout(plate)
+        plate_root.setContentsMargins(10, 5, 10, 6)
+        plate_root.setSpacing(2)
 
         rowa = QHBoxLayout()
-        rowa.setContentsMargins(14, 7, 14, 0)
+        rowa.setContentsMargins(2, 0, 2, 0)
         rowa.setSpacing(6)
         brand = label("ROCKABUDDY")
         brand.setStyleSheet("color:#8fa3a0;font-size:9px;font-weight:700;letter-spacing:3px;")
-        brand.setFixedWidth(130)
         rowa.addWidget(brand)
-        rowa.addStretch(1)
-        spacer = QWidget()               # 给挂孔让位的透明安全区
-        spacer.setFixedSize(HOLE_W + 12, HOLE_H)
-        rowa.addWidget(spacer)
         rowa.addStretch(1)
         self.btn_collapse = QPushButton("仅可用")
         self.btn_collapse.setObjectName("ghost")
-        self.btn_collapse.setFixedHeight(22)
+        self.btn_collapse.setFixedHeight(20)
         self.btn_collapse.setToolTip("精简模式：只显示可用的 AI 服务")
         self.btn_collapse.clicked.connect(self.toggle_collapse)
         rowa.addWidget(self.btn_collapse)
         self.update_collapse_label()
         self.btn_refresh = QPushButton("⟳ 刷新")
         self.btn_refresh.setObjectName("ghost")
-        self.btn_refresh.setFixedHeight(22)
+        self.btn_refresh.setFixedHeight(20)
         self.btn_refresh.clicked.connect(self.refresh_requested)
         rowa.addWidget(self.btn_refresh)
         close = QPushButton("×")
         close.setObjectName("ghost")
         close.setAccessibleName("收起看板")
-        close.setFixedSize(22, 22)
+        close.setFixedSize(20, 20)
         close.setStyleSheet("padding:0px;")
         close.clicked.connect(self.hide)
         rowa.addWidget(close)
-        block_root.addLayout(rowa)
+        plate_root.addLayout(rowa)
 
-        # ---- 复活信息行(原英雄区并入挂牌头) ----
+        # ---- 复活信息行(铭牌下半) ----
         hero_row = QWidget()
-        hero_row.setFixedHeight(56)
         hero_layout = QHBoxLayout(hero_row)
-        hero_layout.setContentsMargins(12, 4, 12, 8)
+        hero_layout.setContentsMargins(2, 0, 2, 0)
         hero_layout.setSpacing(8)
         self.hero_icon = QLabel()
-        self.hero_icon.setFixedSize(30, 30)
+        self.hero_icon.setFixedSize(28, 28)
         self.hero_icon.setAlignment(Qt.AlignCenter)
         hero_layout.addWidget(self.hero_icon)
         mid = QVBoxLayout()
@@ -807,8 +826,9 @@ class Dashboard(QWidget):
         self.hero_hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         right.addWidget(self.hero_hint)
         hero_layout.addLayout(right)
-        block_root.addWidget(hero_row)
-        root.addWidget(block)
+        plate_root.addWidget(hero_row, 1)
+        plate_lay.addWidget(plate)
+        root.addWidget(plate_holder)
 
         # ---- 响应式内容区: 屏幕放不下时内部滚动而不是被截断 ----
         self._scroll = QScrollArea()

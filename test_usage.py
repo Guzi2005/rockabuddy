@@ -134,6 +134,26 @@ class ZcodeTests(unittest.TestCase):
         self.assertTrue(data["source"].startswith("ZCode 本地会话库"))
         self.assertIn("fetched_at", data)
 
+    def test_active_flag_detects_running_requests(self):
+        con = sqlite3.connect(self.db)
+        now_ms = int(time.time() * 1000)
+        con.execute("INSERT INTO model_usage (model_id, status, started_at, "
+                    "input_tokens, output_tokens, computed_total_tokens) "
+                    "VALUES ('GLM-5.3','running',?,0,0,0)",
+                    (now_ms - 1000,))
+        con.commit()
+        con.close()
+        data = providers.fetch_zcode({})
+        self.assertTrue(data["active"])
+        os.environ["ZCODE_DB"] = os.path.join(self.tmp.name, "clean.sqlite")
+        clean = sqlite3.connect(os.environ["ZCODE_DB"])
+        clean.execute("CREATE TABLE model_usage (id INTEGER PRIMARY KEY, model_id TEXT,"
+                      " status TEXT, started_at INTEGER, input_tokens INTEGER,"
+                      " output_tokens INTEGER, computed_total_tokens INTEGER)")
+        clean.commit()
+        clean.close()
+        self.assertFalse(providers.fetch_zcode({})["active"])
+
     def test_plan_label_from_settings(self):
         import tempfile
         tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")

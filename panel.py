@@ -292,6 +292,81 @@ class Sparkline(QWidget):
         p.drawEllipse(path.currentPosition(), 2.2, 2.2)
 
 
+def ring_color(pct):
+    """用量感知配色(参考 Pulse): 充足青绿 → 偏低琥珀 → 告急橙红 → 耗尽深红。"""
+    if pct is None:
+        return "#c2c7ba"
+    if pct > 50:
+        return "#5fae9f"
+    if pct > 30:
+        return "#e0a458"
+    if pct > 10:
+        return "#c96a4a"
+    return "#bb5b3f"
+
+
+# 点火线: 剩余比例跌破这条线就换档报警(在环上画成径向红刻度)
+REDLINES = (30.0, 10.0)
+
+
+class RingGauge(QWidget):
+    """仪表环(参考 Pulse 的 status ring):
+    - 内环粗弧 = 剩余比例, 配色随档位变化;
+    - 环上两道径向刻度 = 点火线(30% / 10%), 跌破换色;
+    - 外圈细弧 = 额度窗口已流逝比例(有时钟意味);
+    - 活跃时一枚亮点沿外圈巡行(该服务正在生成)。
+    """
+
+    def __init__(self, pct, elapsed=None, active=False, drained=False,
+                 parent=None):
+        super().__init__(parent)
+        self.setFixedSize(34, 34)
+        self.pct = None if pct is None else max(0.0, min(100.0, float(pct)))
+        self.elapsed = None if elapsed is None else max(0.0, min(1.0, elapsed))
+        self.active = bool(active)
+        self.drained = bool(drained)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        cx = cy = self.width() / 2
+        r = self.width() / 2 - 5.5
+        rect = QRectF(cx - r, cy - r, r * 2, r * 2)
+        pen = QPen(QColor("#e2e5dc"), 4)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.drawArc(rect, 90 * 16, 360 * 16)                    # 轨道
+        if self.pct is not None:
+            span = int(self.pct / 100.0 * 360 * 16)
+            pen2 = QPen(QColor("#b9bfc0" if self.drained else ring_color(self.pct)), 4)
+            pen2.setCapStyle(Qt.RoundCap)
+            p.setPen(pen2)
+            p.drawArc(rect, 90 * 16, span)                    # 剩余弧(12点起顺时针)
+        # 点火线: 30% 与 10% 两道径向刻度
+        for line in REDLINES:
+            ang = math.radians(90 - line / 100.0 * 360)
+            deep = self.pct is not None and self.pct <= line
+            p.setPen(QPen(QColor("#8f3a24" if deep else "#bb5b3f"), deep and 2 or 1.4))
+            r0, r1 = r - 3.4, r + 3.4
+            p.drawLine(QPointF(cx + r0 * math.cos(ang), cy - r0 * math.sin(ang)),
+                       QPointF(cx + r1 * math.cos(ang), cy - r1 * math.sin(ang)))
+        # 外圈: 窗口时钟弧(已流逝比例)
+        if self.elapsed is not None:
+            re_ = r + 4.6
+            erect = QRectF(cx - re_, cy - re_, re_ * 2, re_ * 2)
+            p.setPen(QPen(QColor("#dfe3d8"), 2))
+            p.drawArc(erect, 90 * 16, 360 * 16)
+            p.setPen(QPen(QColor("#9aa89e"), 2))
+            p.drawArc(erect, 90 * 16, int(self.elapsed * 360 * 16))
+        # 活跃巡行点: 该服务正在生成, 亮点沿外圈转动(每秒 repaint 由卡片 tick 驱动)
+        if self.active:
+            ang = math.radians(90 - (time.time() * 300 % 360))
+            rr = (r + 4.6 if self.elapsed is not None else r)
+            p.setBrush(QColor("#e8b04a"))
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(QPointF(cx + rr * math.cos(ang), cy - rr * math.sin(ang)), 2.4, 2.4)
+
+
 class ProviderIcon(QWidget):
     """可点击的服务图标: 点击把对应应用窗口提到最前(没开就启动)。"""
 
@@ -536,6 +611,25 @@ class UsageCard(QFrame):
         badge.setFixedHeight(16)
         top.addWidget(badge, 0, Qt.AlignVCenter)
         top.addStretch()
+        # 仪表环(参考 Pulse): 环=剩余比例(点火线 30/10%), 外弧=窗口时钟, 巡行点=活跃
+        ring_pct = pct
+        elapsed = None
+        active = bool(data.get("active"))
+        if data.get("windows"):
+            ring_pct = min((w.get("remaining_percent", 100)
+                            for w in data["windows"]), default=None)
+            for w in data["windows"]:
+                if w.get("resets_at") and w.get("duration_minutes"):
+                    left = w["resets_at"] - time.time()
+                    if 0 < left < w["duration_minutes"] * 60:
+                        elapsed = 1 - left / (w["duration_minutes"] * 60)
+                        break
+        self.ring = RingGauge(ring_pct, elapsed=elapsed, active=active,
+                              drained=drained)
+        if ring_pct is None and not active:
+            self.ring.hide()
+        else:
+            top.addWidget(self.ring, 0, Qt.AlignVCenter)
         strong = "#98a09a" if drained else "#1d2a2b"
         resets = next_reset(data)
         if resets:
@@ -663,6 +757,9 @@ class UsageCard(QFrame):
             widget.setText(("已到期 · 待同步" if due else "%s后" % text))
         if getattr(self, "free_rows", None):
             self._refresh_free_status()
+        ring = getattr(self, "ring", None)
+        if ring is not None and ring.active:   # 活跃巡行点动画
+            ring.update()
 
     def _render_free(self, data, color):
         """免费模型清单: 列出限免/夜间免费模型, 实时标注当前是否免费。"""

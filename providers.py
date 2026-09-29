@@ -394,6 +394,14 @@ def fetch_zcode(cfg):
         return _fail(e)
     used = sum(int(r[2] or 0) for r in rows)
     requests = sum(int(r[1] or 0) for r in rows)
+    active = False
+    try:
+        active = bool(_zcode_query(
+            "SELECT COUNT(*) FROM model_usage "
+            "WHERE status='running' AND started_at >= ?",
+            (int((midnight - 0) * 1000),))[0][0])
+    except Exception:  # noqa: BLE001
+        pass
     notes = ["%s %s" % (r[0], _fmt_tokens(int(r[2] or 0))) for r in rows[:3]]
     notes.append("%d 次请求" % requests)
     plan = _zcode_plan_label()
@@ -411,7 +419,7 @@ def fetch_zcode(cfg):
     except Exception:  # noqa: BLE001
         pass
     budget = cfg.get("daily_budget_tokens")
-    result = {"ok": True, "unit": "万tok", "error": None,
+    result = {"ok": True, "unit": "万tok", "error": None, "active": active,
               "source": "ZCode 本地会话库" + (" · " + plan if plan else ""),
               "note": ("[%s] " % plan if plan else "") + "今日 · " + " · ".join(notes) + month_note}
     if budget:

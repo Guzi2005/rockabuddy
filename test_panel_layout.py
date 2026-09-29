@@ -247,5 +247,34 @@ class CleanPanelTests(unittest.TestCase):
         self.assertFalse(_in_night_window("23:00-08:00", now=noon))
 
 
+    def test_ring_color_follows_redlines(self):
+        from panel import ring_color, REDLINES, RingGauge
+        self.assertEqual(ring_color(80), "#5fae9f")
+        self.assertEqual(ring_color(40), "#e0a458")
+        self.assertEqual(ring_color(20), "#c96a4a")
+        self.assertEqual(ring_color(5), "#bb5b3f")
+        self.assertEqual(ring_color(None), "#c2c7ba")
+        self.assertEqual(tuple(REDLINES), (30.0, 10.0))
+        ring = RingGauge(84, elapsed=.3, active=True)
+        ring.grab()                                  # 离屏渲染不报错
+        self.assertEqual(ring.width(), 34)
+
+    def test_card_has_ring_when_quota_known(self):
+        cfg={'providers':[{'id':'codex','name':'Codex','type':'codex'}]}
+        data={'codex':{'ok':True,'remaining':8,'total':100,'windows':[
+            {'label':'5 小时','remaining_percent':8,'duration_minutes':300,
+             'resets_at':time.time()+1800}]}}
+        board=Dashboard()
+        board.set_data(cfg,data)
+        board.show()
+        qt.processEvents()
+        from panel import RingGauge
+        rings=board.cards[0].findChildren(RingGauge)
+        self.assertEqual(len(rings),1)
+        self.assertAlmostEqual(rings[0].pct, 8.0)
+        self.assertIsNotNone(rings[0].elapsed)       # 窗口时钟弧有值
+        board.close()
+
+
 if __name__=='__main__':
     unittest.main()

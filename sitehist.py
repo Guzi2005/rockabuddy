@@ -44,6 +44,15 @@ def strip_browser_suffix(title):
     return t
 
 
+def _domain_stem(domain):
+    """域名主体: 跳过 www 前缀, 取最有辨识度的一段。
+    www.trae.ai -> trae; trae.cn -> trae; docs.trae.ai -> docs(子域名保留)。"""
+    parts = [p for p in domain.split(".") if p]
+    if parts and parts[0] == "www" and len(parts) > 1:
+        return parts[1]
+    return parts[0] if parts else ""
+
+
 def page_display_name(page_title, domain):
     """气泡显示名: 页面标题的最后一段(网站常把站名放最后), 太长就退到域名主体。"""
     for sep in (" - ", " — ", " – ", " | ", " · ", "_"):
@@ -51,7 +60,7 @@ def page_display_name(page_title, domain):
             last = page_title.rsplit(sep, 1)[-1].strip()
             if 1 < len(last) <= 14:
                 return last
-    stem = domain.split(".")[0] if domain else page_title[:12]
+    stem = _domain_stem(domain) if domain else page_title[:12]
     return stem or page_title[:12]
 
 

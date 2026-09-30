@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "D:\workspace\tokenspy\app.py", line 576, in <module>
+    App().run()
+    ~~~^^
+  File "D:\workspace\tokenspy\app.py", line 326, in __init__
+    self.board = Dashboard()
+                 ~~~~~~~~~^^
+  File "D:\workspace\tokenspy\panel.py", line 858, in __init__
+    strip = HoleStrip()
+            ^^^^^^^^^
+NameError: name 'HoleStrip' is not defined

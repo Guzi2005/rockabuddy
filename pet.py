@@ -4,11 +4,12 @@ import math
 import os
 import random
 import statistics
+import sys
 import time
 import paths
 from animation import SpritePlayer, SUNFLOWER_HOLD_FRAME, SUNFLOWER_PALM, SUNFLOWER_LIFT_SECONDS
 
-from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QSettings, QTimer, Signal
+from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QProcess, QSettings, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QFont, QFontMetrics,
                            QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform)
 from PySide6.QtWidgets import (QApplication, QMenu, QWidget,
@@ -1532,12 +1533,25 @@ class PetWidget(QWidget):
             role.addAction(act)
 
         menu.addSeparator()
-        quit_act = menu.addAction("退出")
-        bold = quit_act.font()
+        restart_act = menu.addAction("重启")
+        bold = restart_act.font()
         bold.setBold(True)
+        restart_act.setFont(bold)
+        restart_act.triggered.connect(self.restart_app)
+        quit_act = menu.addAction("退出")
         quit_act.setFont(bold)
         quit_act.triggered.connect(QApplication.quit)
         menu.exec(event.globalPos())
+
+    def restart_app(self):
+        """重启: 分离式起一个新进程再退出当前实例。
+        aboutToQuit 会自动触发 App.shutdown 做退出同步, 无需在此重复处理。
+        兼容源码运行(python app.py)和 PyInstaller onefile(frozen exe)两种形态。"""
+        if getattr(sys, "frozen", False):
+            QProcess.startDetached(sys.executable, [])
+        else:
+            QProcess.startDetached(sys.executable, [os.path.abspath(sys.argv[0])])
+        QApplication.quit()
 
     def resize_pet(self, height):
         self.set_size(height)

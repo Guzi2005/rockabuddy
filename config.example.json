@@ -48,16 +48,35 @@
       "launch": "C:\\Users\\<你>\\AppData\\Local\\Programs\\kimi-desktop\\Kimi.exe"
     },
     {
-      "id": "trae",
-      "name": "Trae",
-      "type": "manual",
-      "unit": "次请求",
-      "total": 600,
-      "remaining": 600,
-      "note": "双击卡片更新",
+      "id": "trae-main",
+      "name": "Trae 主号",
+      "type": "trae",
+      "unit": "%",
+      "region": "auto",
       "processes": [
-        "Trae.exe"
-      ]
+        "Trae.exe",
+        "Trae CN.exe"
+      ],
+      "launch": "C:\\Users\\<你>\\AppData\\Local\\Programs\\Trae\\Trae.exe",
+      "note": "自动读取本机 Trae 登录态（打开 Trae 登录后自动同步）"
+    },
+    {
+      "id": "trae-2",
+      "name": "Trae 小号",
+      "type": "trae",
+      "unit": "%",
+      "region": "global",
+      "processes": [],
+      "note": "多账号二号：点击「连接」粘贴 trae.ai F12 取的 token（Cloud-IDE-JWT 开头或 eyJ 开头的 JWT）"
+    },
+    {
+      "id": "trae-cn",
+      "name": "Trae CN 企业号",
+      "type": "trae",
+      "unit": "%",
+      "region": "cn",
+      "processes": [],
+      "note": "国内版三号：手动粘贴 trae.cn 登录 token"
     }
   ]
 }

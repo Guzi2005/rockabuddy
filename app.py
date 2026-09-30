@@ -231,6 +231,7 @@ def merge_results(previous, current):
     for pid, value in current.items():
         old = previous.get(pid, {})
         if not value.get("ok") and old.get("ok"):
+            # 失败保留旧读数并标记 stale(v1 缓存也一样, 否则一次网络抖动就把卡片清空)
             merged[pid] = dict(old, stale=True, error=value.get("error"),
                                last_attempt_at=value.get("fetched_at"))
         else:

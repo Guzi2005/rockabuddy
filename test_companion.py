@@ -226,8 +226,15 @@ class TrainingTests(unittest.TestCase):
 
 
 class GreetHoldTests(unittest.TestCase):
-    def test_hover_holds_chin_pose_and_leave_plays_outro(self):
+    @staticmethod
+    def _owl_pet():
         pet = PetWidget()
+        pet.character = "owl"          # 打招呼剪辑是奥尔专属, 固定角色避免受本机设置影响
+        pet.player.set_character("owl")
+        return pet
+
+    def test_hover_holds_chin_pose_and_leave_plays_outro(self):
+        pet = self._owl_pet()
         self.addCleanup(pet.close)
         pet.enterEvent(None)
         self.assertIn(pet.player.clip, ("greet", "wave"))
@@ -240,7 +247,7 @@ class GreetHoldTests(unittest.TestCase):
         self.assertIsNone(pet.player.hold_frame)
 
     def test_say_hi_auto_finishes_after_hold(self):
-        pet = PetWidget()
+        pet = self._owl_pet()
         self.addCleanup(pet.close)
         from animation import CLIPS
         pet.say_hi()

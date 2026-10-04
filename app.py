@@ -34,7 +34,7 @@ QUIT_SYNC_BUDGET = 6.0    # 退出同步总预算(秒)
 
 def load_env(path):
     """本地 .env(KEY=VALUE)注入进程环境, 已存在的环境变量优先。
-    密钥只存本地: .env / Windows 凭据管理器, 绝不入库。"""
+    密钥只存本地: .env / Windows DPAPI 加密存储, 绝不入库。"""
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -443,7 +443,7 @@ class App(QObject):
             return
         self.pet.busy = True
         self.pet.update()
-        self.board.btn_refresh.setText("同步中…")
+        self.board.btn_refresh.setText("⌛")       # 同步中: 换沙漏图标
         self.board.btn_refresh.setEnabled(False)
         self.worker = FetchWorker(configs)
         self.worker.done.connect(self.on_results)
@@ -454,7 +454,7 @@ class App(QObject):
         if self._closing:
             return
         self.active_procs = procs or self.active_procs
-        self.board.btn_refresh.setText("⟳ 刷新")
+        self.board.btn_refresh.setText("⟳")
         self.board.btn_refresh.setEnabled(True)
         try:
             cfg = load_config()

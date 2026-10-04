@@ -12,7 +12,8 @@ from animation import SpritePlayer, SUNFLOWER_HOLD_FRAME, SUNFLOWER_PALM, SUNFLO
 from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QProcess, QSettings, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QFont, QFontMetrics,
                            QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform)
-from PySide6.QtWidgets import (QApplication, QMenu, QWidget,
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QMenu, QPushButton,
+                               QWidget, QWidgetAction,
                                QGraphicsDropShadowEffect)
 
 ASSET = paths.resource_path("assets", "companion.png")
@@ -1533,15 +1534,38 @@ class PetWidget(QWidget):
             role.addAction(act)
 
         menu.addSeparator()
-        restart_act = menu.addAction("重启")
-        bold = restart_act.font()
-        bold.setBold(True)
-        restart_act.setFont(bold)
-        restart_act.triggered.connect(self.restart_app)
-        quit_act = menu.addAction("退出")
-        quit_act.setFont(bold)
-        quit_act.triggered.connect(QApplication.quit)
+        menu.addAction(self._menu_bottom_row(menu))
         menu.exec(event.globalPos())
+
+    def _menu_bottom_row(self, menu):
+        """胶囊菜单收底: 重启 / 退出 同行平分, 两枚等宽按钮。"""
+        bottom = QWidget(menu)
+        bottom.setStyleSheet(
+            "QPushButton {background:transparent;border:0;border-radius:7px;"
+            "padding:7px 0;font-size:12px;font-weight:700;color:#26383a;}"
+            "QPushButton:hover {background:#cfe4dc;}"
+            "QPushButton:pressed {background:#b9d8cd;}")
+        row = QHBoxLayout(bottom)
+        row.setContentsMargins(4, 2, 4, 4)
+        row.setSpacing(4)
+        restart_btn = QPushButton("重启")
+        quit_btn = QPushButton("退出")
+
+        def _restart_and_close():
+            menu.close()
+            self.restart_app()
+
+        def _quit_and_close():
+            menu.close()
+            QApplication.quit()
+
+        restart_btn.clicked.connect(_restart_and_close)
+        quit_btn.clicked.connect(_quit_and_close)
+        row.addWidget(restart_btn, 1)
+        row.addWidget(quit_btn, 1)
+        holder = QWidgetAction(menu)
+        holder.setDefaultWidget(bottom)
+        return holder
 
     def restart_app(self):
         """重启: 分离式起一个新进程再退出当前实例。

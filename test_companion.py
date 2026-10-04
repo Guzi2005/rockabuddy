@@ -271,6 +271,31 @@ class GreetHoldTests(unittest.TestCase):
         self.assertEqual(idx[-1], 0)
 
 
+class MenuBottomBarTests(unittest.TestCase):
+    def test_menu_bottom_row_splits_restart_quit_equally(self):
+        from PySide6.QtWidgets import QMenu, QPushButton, QWidgetAction
+        pet = PetWidget()
+        self.addCleanup(pet.close)
+        menu = QMenu()
+        holder = pet._menu_bottom_row(menu)
+        self.assertIsInstance(holder, QWidgetAction)
+        bar = holder.defaultWidget()
+        btns = bar.findChildren(QPushButton)
+        self.assertEqual([b.text() for b in btns], ["重启", "退出"])
+        lay = bar.layout()
+        self.assertEqual([lay.stretch(i) for i in range(lay.count())], [1, 1])  # 平分
+
+    def test_restart_app_spawns_and_quits(self):
+        from unittest.mock import patch
+        pet = PetWidget()
+        self.addCleanup(pet.close)
+        with patch("pet.QProcess.startDetached", return_value=True) as sd, \
+                patch.object(QApplication, "quit") as q:
+            pet.restart_app()
+        sd.assert_called_once()
+        q.assert_called_once()
+
+
 class OperaNoteTests(unittest.TestCase):
     def test_release_creates_note_scaled_by_phrase(self):
         pet = PetWidget()

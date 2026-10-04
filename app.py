@@ -571,6 +571,13 @@ if __name__ == "__main__":
         if sys.platform == "win32":
             ok, old_pid = acquire_lock()
             if not ok:
+                # 重启竞态: 旧实例正在退出, 稍等重试几次再判多开
+                for _ in range(6):
+                    time.sleep(.5)
+                    ok, old_pid = acquire_lock()
+                    if ok:
+                        break
+            if not ok:
                 _bring_to_front(old_pid)      # 已有实例: 提到最前, 不再弹框后退出
                 sys.exit(0)
             we_own_lock = True

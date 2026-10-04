@@ -885,7 +885,6 @@ class Dashboard(QWidget):
         self._hero_reset = None
         self._hero_pid = None
         self._settings = QSettings("Rockabuddy", "Dashboard")
-        self._collapsed = False
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         surface = PanelSurface()
@@ -916,14 +915,6 @@ class Dashboard(QWidget):
         spacer.setFixedSize(HOLE_W + 12, HOLE_H)
         rowa.addWidget(spacer)
         rowa.addStretch(1)
-        self.btn_collapse = QPushButton("仅可用")
-        self.btn_collapse.setObjectName("ghost")
-        self.btn_collapse.setFixedHeight(22)
-        self.btn_collapse.setStyleSheet("padding:2px 8px;")
-        self.btn_collapse.setToolTip("收起面板，再次点击桌宠展开")
-        self.btn_collapse.clicked.connect(self.toggle_collapse)
-        rowa.addWidget(self.btn_collapse)
-        self.update_collapse_label()
         self.btn_refresh = QPushButton("⟳ 刷新")
         self.btn_refresh.setObjectName("ghost")
         self.btn_refresh.setFixedHeight(22)
@@ -1110,15 +1101,12 @@ class Dashboard(QWidget):
         return p is None or p > 0.5
 
     def _empty_state(self):
-        """没有卡片可展示时的占位(精简态无可用服务 / 还没配置服务)。"""
+        """没有卡片可展示时的占位(还没配置服务)。"""
         box = QWidget()
         lay = QVBoxLayout(box)
         lay.setContentsMargins(14, 22, 14, 22)
         lay.setSpacing(6)
-        if self._collapsed:
-            t1, t2 = "没有可用的 AI 服务", "点「全部」展开查看所有"
-        else:
-            t1, t2 = "还没有添加任何服务", "在 config.json 的 providers 里加上"
+        t1, t2 = "还没有添加任何服务", "在 config.json 的 providers 里加上"
         a = label(t1, "muted")
         a.setStyleSheet("font-size:13px;font-weight:700;color:#788784;")
         a.setAlignment(Qt.AlignCenter)
@@ -1127,12 +1115,6 @@ class Dashboard(QWidget):
         lay.addWidget(a)
         lay.addWidget(b)
         return box
-
-    def update_collapse_label(self):
-        self.btn_collapse.setText("收起")
-
-    def toggle_collapse(self):
-        self.hide()
 
     def _day_baseline(self, pid, midnight):
         """该服务今日零点前最后一次记录的剩余%(history 按时间追加, 取最后一个)。"""
@@ -1146,8 +1128,6 @@ class Dashboard(QWidget):
         """下次复活 = 所有窗口里最近的重置点; 没有则退到余量最低的服务。"""
         best = None
         providers = self.cfg.get("providers", [])
-        if self._collapsed:
-            providers = [c for c in providers if self._is_usable(c)]
         for cfg in providers:
             data = self.results.get(cfg["id"], {})
             ts = next_reset(data)
@@ -1179,10 +1159,6 @@ class Dashboard(QWidget):
         def usable(cfg):
             """在线且未耗尽: 卡片强调置顶; 耗尽/失败/没数据的扁平沉底。"""
             return self._is_usable(cfg)
-
-        if self._collapsed:
-            # 精简态: 丢弃不可用的 AI, 只保留可用卡片
-            providers = [c for c in providers if self._is_usable(c)]
 
         providers.sort(key=usable, reverse=True)   # 稳定排序: 组内保持配置顺序
         for index, cfg in enumerate(providers):

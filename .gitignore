@@ -3,8 +3,10 @@ history.jsonl
 usage-cache.json
 sync-state.json
 config.json
+crash.log
+.tokenspy_lock
 
-# 密钥与敏感信息: 只存本地(.env / Windows 凭据管理器), 绝不入库
+# 密钥与敏感信息: 只存本地(.env / Windows DPAPI 加密存储), 绝不入库
 .env
 *.env
 secrets.json

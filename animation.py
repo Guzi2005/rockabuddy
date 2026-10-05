@@ -254,6 +254,14 @@ class SpritePlayer:
             index = self.hold_frame % len(self.frames) if self.frames else self.hold_frame
             self._set(index, now)
             return index
+        if self.dozing:
+            # 打盹优先于一切表演(跟唱/摇摆): 电脑安静时她相对静止在一帧,
+            # 只有 pet 侧舒缓呼吸与 Zzz 粒子; 有拍点会被 _on_beat 唤醒
+            if desk and len(self.frames) > 22:
+                self._set(22, now)
+            else:
+                self._set(2, now)
+            return self.frame_index
         if self.opera:
             # 美声跟唱: 眯眼笑的表情定住, 摇摆由 pet 侧按乐句缓动
             self._set(5, now)
@@ -283,13 +291,6 @@ class SpritePlayer:
                 index = (ROCK_L if s < 0 else ROCK_R)[min(level, self.rock_cap)]
             self._set(index, now)
             return index
-        if self.dozing:
-            # 打盹: 闭眼帧定住, 不眨眼不抖耳(pet 侧负责唤醒与 Zzz 粒子)
-            if desk and len(self.frames) > 22:
-                self._set(22, now)
-            else:
-                self._set(2, now)
-            return self.frame_index
         if now >= self.next_blink:
             if desk and len(self.frames) > 22:
                 # 办公桌模式: 用带笔记本的专用眨眼帧, 不切回全身

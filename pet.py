@@ -43,7 +43,7 @@ QMenu {
   border: 1px solid #d9dcd2;
   border-radius: 10px;
   padding: 5px;
-  font-size: 12px;
+  font-family: 'Microsoft YaHei UI';
 }
 QMenu::item {
   padding: 7px 26px 7px 22px;
@@ -78,6 +78,19 @@ QMenu::indicator:non-exclusive:checked {
   left: 5px;
 }
 """
+
+
+def widen_menu(menu, extra=96):
+    """高 DPI(150%) 下菜单条目几何与字体缩放不同步, 文字会被"…"截断。
+    在菜单弹出前按"所有条目文字实测最宽值"强制加宽——宁可菜单宽点,
+    不要不可读的省略号。"""
+    def _apply():
+        fm = menu.fontMetrics()
+        need = max((fm.horizontalAdvance(a.text())
+                    for a in menu.actions() if a.text()), default=0)
+        menu.setMinimumWidth(need + extra)   # 覆盖左指示器列/右箭头/内外边距
+    menu.aboutToShow.connect(_apply)
+    return menu
 
 
 def autostart_enabled():
@@ -610,6 +623,12 @@ class PetWidget(QWidget):
         gx = max(-1.0, min(1.0, dx / 170.0))
         gy = max(-1.0, min(1.0, dy / 170.0))
         ease = 1 - math.exp(-9 * delta)
+        if self.player.dozing:
+            # 打盹: 相对静止——不看光标, 视线/倾角缓缓归零, 只留呼吸
+            self._gaze_x += (0.0 - self._gaze_x) * ease
+            self._gaze_y += (0.0 - self._gaze_y) * ease
+            self._target_tilt += (0.0 - self._target_tilt) * ease
+            return
         self._gaze_x += ((gx * 3.0 if near else 0.0) - self._gaze_x) * ease
         self._gaze_y += ((gy * 2.2 if near else 0.0) - self._gaze_y) * ease
         if not self.player.rocking and not self.player.opera:
@@ -1011,7 +1030,11 @@ class PetWidget(QWidget):
             # SAI 式自由变形: 斜拉(顶边平移、底边钉死在地平线)+ 轻微压缩/拉长,
             # 不再做绕脚底的刚体旋转; 摇摆/眩晕/拖拽斜倾/美声缓动全走同一套变形
             feet_x, feet_y = rect.center().x(), rect.bottom()
-            breath = math.sin(self._phase) * .008 if self._animate else 0
+            if self.player.dozing and self._drag_pos is None:
+                # 打盹呼吸: 比清醒更慢更深(约 5 秒一个循环), 睡得香
+                breath = math.sin(self._now * 1.25) * .015 if self._animate else 0
+            else:
+                breath = math.sin(self._phase) * .008 if self._animate else 0
             k = math.tan(math.radians(self._tilt if self._animate else 0.0)) + sway_shear
             k = max(-0.22, min(0.22, k))
             squash = min(1.0, dip * 0.7 + abs(k) * 0.45)
@@ -1455,6 +1478,7 @@ class PetWidget(QWidget):
         shadow.setOffset(0, 6)
         shadow.setColor(QColor(18, 27, 29, 90))
         menu.setGraphicsEffect(shadow)
+        widen_menu(menu)
 
         open_act = menu.addAction("打开 / 收起看板")
         bold = open_act.font()
@@ -1464,7 +1488,7 @@ class PetWidget(QWidget):
         refresh_act = menu.addAction("立即刷新")
         refresh_act.triggered.connect(self.refresh_requested.emit)
 
-        fun = menu.addMenu("互动")
+        fun = widen_menu(menu.addMenu("互动"))
         fun.addAction("摸摸头", lambda: self.react("pet", self.revive_text))
         fun.addAction("打个招呼", self.say_hi)
         fun.addAction("快端上来罢（启动记录）", self.show_trophy)
@@ -1473,7 +1497,7 @@ class PetWidget(QWidget):
         desk.setChecked(self._desk)
         desk.triggered.connect(self.toggle_desk)
 
-        music = menu.addMenu("听音乐模式")
+        music = widen_menu(menu.addMenu("听音乐模式"))
         train = music.addAction("训练 10 秒（学你的敲击）")
         train.triggered.connect(self.start_training)
         music.addSeparator()
@@ -1487,7 +1511,7 @@ class PetWidget(QWidget):
             act.triggered.connect(lambda _checked, m=mode: self.set_music_mode(m))
             music.addAction(act)
 
-        cfg = menu.addMenu("设置")
+        cfg = widen_menu(menu.addMenu("设置"))
         motion = cfg.addAction("动画与互动动作")
         motion.setCheckable(True)
         motion.setChecked(self._animate)
@@ -1500,7 +1524,7 @@ class PetWidget(QWidget):
         autostart.setCheckable(True)
         autostart.setChecked(autostart_enabled())
         autostart.triggered.connect(set_autostart)
-        size = cfg.addMenu("桌宠大小")
+        size = widen_menu(cfg.addMenu("桌宠大小"))
         size_group = QActionGroup(size)
         size_group.setExclusive(True)
         current_h = self.settings.value("height", 210, type=int)
@@ -1511,7 +1535,7 @@ class PetWidget(QWidget):
             size_group.addAction(act)
             act.triggered.connect(lambda _checked, h=height: self.resize_pet(h))
             size.addAction(act)
-        glass = cfg.addMenu("看板毛玻璃")
+        glass = widen_menu(cfg.addMenu("看板毛玻璃"))
         glass_group = QActionGroup(glass)
         glass_group.setExclusive(True)
         for value, text in ((0, "不透明"), (25, "25% 透明"), (45, "45% 透明"),
@@ -1522,7 +1546,7 @@ class PetWidget(QWidget):
             glass_group.addAction(act)
             act.triggered.connect(lambda _checked, v=value: self.set_panel_glass(v))
             glass.addAction(act)
-        role = cfg.addMenu("角色")
+        role = widen_menu(cfg.addMenu("角色"))
         role_group = QActionGroup(role)
         role_group.setExclusive(True)
         for cid, text in (("owl", "奥尔（猫头鹰娘）"), ("sunflower", "向日葵")):

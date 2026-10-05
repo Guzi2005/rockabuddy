@@ -272,6 +272,51 @@ class GreetHoldTests(unittest.TestCase):
 
 
 class MenuBottomBarTests(unittest.TestCase):
+    def test_menu_popup_fits_every_item_text(self):
+        """高 DPI 下菜单会被"…"截断文字; 弹出时按实测加宽后, 每条都要放得下。"""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction, QActionGroup
+        import pet as P
+        menu = QMenu()
+        menu.setStyleSheet(P.MENU_STYLE)
+        music = P.widen_menu(menu.addMenu("听音乐模式"))
+        music.addAction("训练 10 秒（学你的敲击）")
+        music.addSeparator()
+        group = QActionGroup(music)
+        group.setExclusive(True)
+        for key in P.MUSIC_MODES:
+            act = QAction(P.MUSIC_MENU[key], music)
+            act.setCheckable(True)
+            group.addAction(act)
+            music.addAction(act)
+        music.popup(QPoint(50, 50))          # 真实弹出路径触发 aboutToShow 加宽
+        qt.processEvents()
+        fm = music.fontMetrics()
+        for act in music.actions():
+            if not act.text():
+                continue
+            rect = music.actionGeometry(act)
+            need = fm.horizontalAdvance(act.text()) + 48 + 26
+            self.assertGreaterEqual(
+                rect.width(), need,
+                "菜单项被截断: %s (rect=%d need=%d)" % (act.text(), rect.width(), need))
+        music.close()
+
+    def test_doze_overrides_rock_and_talk(self):
+        """打盹优先: 电脑安静入睡后不再摇摆/张嘴, 定在闭眼帧。"""
+        from animation import SpritePlayer
+        player = SpritePlayer(os.path.dirname(ASSET))
+        player.rocking = True
+        player.rock_anchor = 0.0
+        player.rock_period = 0.5
+        player.talking = True
+        player.dozing = True
+        frames = {player.sample(i / 30) for i in range(60)}
+        self.assertEqual(frames, {2})        # 只有闭眼帧, 没有摇摆/张嘴帧
+        player.dozing = False
+        self.assertNotEqual({player.sample(i / 30) for i in range(30)}, {2})
+
     def test_menu_bottom_row_splits_restart_quit_equally(self):
         from PySide6.QtWidgets import QMenu, QPushButton, QWidgetAction
         pet = PetWidget()

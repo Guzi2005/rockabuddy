@@ -174,29 +174,6 @@ class CleanPanelTests(unittest.TestCase):
         self.assertEqual([e[0] for e in pet.orbit],["a","b","c"])
         self.assertTrue(all(e[2] for e in pet.orbit))
 
-    def test_halo_anchor_follows_real_head(self):
-        """光环圆心锚定当帧精灵真实头顶(角色不同/身高不同都能贴住)。"""
-        pet=PetWidget()
-        self.addCleanup(pet.close)
-        pet._hover = True
-        pet.orbit=[("a","92%",False)]
-        pet._now += 1.0
-        pet.grab()                       # 强制一帧 paint, 记录 _head_top/_head_cx
-        from PySide6.QtCore import QRectF
-        rect=QRectF(32, 40, pet.width()-64, pet._full_h-44)
-        cx, cy = pet._halo_anchor(rect)
-        self.assertIsNotNone(pet._head_top)
-        self.assertAlmostEqual(cy, pet._head_top - 8, places=6)
-        self.assertAlmostEqual(cx, pet._head_cx, places=6)
-        # 换向日葵(头位不同)后锚点应跟着变
-        top_owl = pet._head_top
-        pet.character="sunflower"
-        pet.player.set_character("sunflower")
-        pet.set_size(210)
-        pet._now += 1.0
-        pet.grab()
-        self.assertNotEqual(pet._head_top, top_owl)
-
     def test_provider_icon_click_emits_activate(self):
         from PySide6.QtCore import Qt, QPoint
         from PySide6.QtTest import QTest

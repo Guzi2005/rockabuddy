@@ -855,12 +855,6 @@ class PetWidget(QWidget):
             self.player.play(out, time.monotonic() - self._epoch)
         self.update()
 
-    def _halo_anchor(self, rect):
-        """光环圆心 = 当前角色当帧真实头顶(奥尔/向日葵头位置各不相同)。"""
-        cx = self._head_cx if self._head_cx is not None else rect.center().x()
-        top = self._head_top if self._head_top is not None else rect.top()
-        return cx, top - 8
-
     def _icon(self, pid, gray=False):
         key = (pid, gray)
         if key not in self._icons:
@@ -1008,6 +1002,32 @@ class PetWidget(QWidget):
         # 叠叠乐把窗口向上加高过时, 排版区整体下移, 她始终贴窗口底(屏幕位置不动)
         rect = QRectF(8 + SPRITE_PAD_X, 40 + self._trophy_pad,
                       self.width() - 16 - 2 * SPRITE_PAD_X, rect_h)
+        # 悬停光环: 原版位置与算法(窗口居中圆弧, 画在精灵背后)
+        halo_active = self._hover and self.orbit
+        halo = []
+        if halo_active:
+            n = len(self.orbit)
+            cx = self.width() / 2
+            # 办公桌模式窗口矮: 半径收小、扫角放宽, 圆弧更圆才能排开
+            sweep = 170 if self._desk else 140
+            radius = min(self.width() * .42, 56) if self._desk else min(self.width() * .46, 74)
+            cy = rect.top() + 46 if self._desk else rect.top() + rect.height() * .30
+            for i, (pid, text, drained) in enumerate(self.orbit):
+                angle = math.radians(90 + (i - (n - 1) / 2) * (sweep / (n - 1)) if n > 1 else 90)
+                t = min(1, max(0, (self._now - self._hover_since - i * .06) / .25))
+                if t <= 0:
+                    continue
+                scale = ease_out_back(t)
+                x, y = cx + radius * math.cos(angle), cy - radius * math.sin(angle)
+                x = min(max(14, x), self.width() - 14)  # 图标不飞出窗口左右边缘
+                pix = self._icon(pid, gray=drained)
+                if not pix.isNull():
+                    size = (22 if self._desk else 26) * scale
+                    p.save()
+                    p.setOpacity(min(1, t * 1.4) * (.55 if drained else 1))
+                    p.drawPixmap(QRectF(x - size / 2, y - size / 2, size, size).toRect(), pix)
+                    p.restore()
+                halo.append((x, y - (14 if self._desk else 16), text, t, drained))
         if not self.sprite.isNull():
             p.save()
             # SAI 式自由变形: 斜拉(顶边平移、底边钉死在地平线)+ 轻微压缩/拉长,
@@ -1067,31 +1087,6 @@ class PetWidget(QWidget):
         else:
             p.setPen(QColor("#304a52"))
             p.drawText(rect, Qt.AlignCenter, "Rockabuddy\n桌宠素材未找到")
-        # 悬停光环: 精确锚定当前角色(奥尔/向日葵)的真实头顶 ——
-        # 用当帧精灵落位算出的 _head_top/_head_cx 做圆心, 图标弧绕头排开
-        halo_active = self._hover and self.orbit
-        halo = []
-        if halo_active:
-            n = len(self.orbit)
-            cx, cy = self._halo_anchor(rect)
-            sweep = 170 if self._desk else 140
-            radius = min(self.width() * .42, 56) if self._desk else min(self.width() * .46, 74)
-            for i, (pid, text, drained) in enumerate(self.orbit):
-                angle = math.radians(90 + (i - (n - 1) / 2) * (sweep / (n - 1)) if n > 1 else 90)
-                t = min(1, max(0, (self._now - self._hover_since - i * .06) / .25))
-                if t <= 0:
-                    continue
-                scale = ease_out_back(t)
-                x, y = cx + radius * math.cos(angle), cy - radius * math.sin(angle)
-                x = min(max(14, x), self.width() - 14)  # 图标不飞出窗口左右边缘
-                pix = self._icon(pid, gray=drained)
-                if not pix.isNull():
-                    size = (22 if self._desk else 26) * scale
-                    p.save()
-                    p.setOpacity(min(1, t * 1.4) * (.55 if drained else 1))
-                    p.drawPixmap(QRectF(x - size / 2, y - size / 2, size, size).toRect(), pix)
-                    p.restore()
-                halo.append((x, y - (14 if self._desk else 16), text, t, drained))
         if self._desk and not desk_baked:
             self._draw_laptop(p, self._typing())
         if self._now < self._train_until:

@@ -164,6 +164,9 @@ class PetWidget(QWidget):
         self.revive_text = "点我查看用量"
         self._alert_text = ""
         self._icons = {}         # pid -> QPixmap 缓存
+        self._head_top = None    # 当帧精灵头顶(锚定光环/气泡)
+        self._head_cx = None
+        self.orbit = []          # hover 时头顶光环: [(pid, 简短数字, 是否耗尽)]
         self._hover_since = -10.0
         self._bubble_pop = -10.0
         self._drag_pos = None
@@ -852,6 +855,12 @@ class PetWidget(QWidget):
             self.player.play(out, time.monotonic() - self._epoch)
         self.update()
 
+    def _halo_anchor(self, rect):
+        """光环圆心 = 当前角色当帧真实头顶(奥尔/向日葵头位置各不相同)。"""
+        cx = self._head_cx if self._head_cx is not None else rect.center().x()
+        top = self._head_top if self._head_top is not None else rect.top()
+        return cx, top - 8
+
     def _icon(self, pid, gray=False):
         key = (pid, gray)
         if key not in self._icons:
@@ -868,13 +877,44 @@ class PetWidget(QWidget):
             self._icons[key] = pix
         return self._icons[key]
 
+    @staticmethod
+    def _orbit_text(data):
+        """光环数字: 有重置窗口的给复活时刻(超出今明两天带日期), 其余给剩余比例/数量。
+        返回 (文字, 是否已耗尽); 没有可用数据的返回 None(由调用方灰显占位)。"""
+        if not data.get("ok"):
+            return None
+        wins = [w for w in (data.get("windows") or [])
+                if w.get("resets_at") and w["resets_at"] > time.time()]
+        if wins:
+            soonest = min(w["resets_at"] for w in wins)
+            drained = min(w.get("remaining_percent", 100) for w in
+                          (data.get("windows") or [])) <= 0.5
+            if soonest - time.time() < 48 * 3600:
+                return time.strftime("%H:%M", time.localtime(soonest)), drained
+            tm = time.localtime(soonest)
+            return "%d/%d %02d:%02d" % (tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min), drained
+        if data.get("total") and data.get("remaining") is not None:
+            pct = round(data["remaining"] / data["total"] * 100)
+            return "%d%%" % pct, pct <= 0
+        if data.get("remaining") is not None:
+            v = float(data["remaining"])
+            text = "%d" % v if v.is_integer() else "%.1f" % v
+            return (("¥" + text) if data.get("unit") == "¥" else text), v <= 0
+        return None
+
     def set_status(self, results, configs):
         ratios = []
         self.stale = any(d.get("stale") for d in results.values())
+        orbit = []
         soonest = None
         soonest_name = ""
         for cfg in configs:
             data = results.get(cfg["id"], {})
+            entry = self._orbit_text(data)
+            if entry is None:
+                # 同步失败/未连接/没数据的也进光环, 半透明灰色占位
+                entry = ("--", True)
+            orbit.append((cfg["id"], entry[0], entry[1]))
             if cfg.get("type") == "manual":
                 continue
             if data.get("ok") and not data.get("stale") and data.get("total", 0) and data.get("remaining") is not None:
@@ -884,6 +924,7 @@ class PetWidget(QWidget):
                 if ts and ts > time.time() and window.get("remaining_percent", 100) < 100:
                     if soonest is None or ts < soonest:
                         soonest, soonest_name = ts, cfg["name"]
+        self.orbit = orbit[:8]
         self.pct = min(ratios)[0] if ratios else None
         self.alert = self.pct is not None and self.pct < 30
         lowest = min(ratios) if ratios else None
@@ -1026,6 +1067,31 @@ class PetWidget(QWidget):
         else:
             p.setPen(QColor("#304a52"))
             p.drawText(rect, Qt.AlignCenter, "Rockabuddy\n桌宠素材未找到")
+        # 悬停光环: 精确锚定当前角色(奥尔/向日葵)的真实头顶 ——
+        # 用当帧精灵落位算出的 _head_top/_head_cx 做圆心, 图标弧绕头排开
+        halo_active = self._hover and self.orbit
+        halo = []
+        if halo_active:
+            n = len(self.orbit)
+            cx, cy = self._halo_anchor(rect)
+            sweep = 170 if self._desk else 140
+            radius = min(self.width() * .42, 56) if self._desk else min(self.width() * .46, 74)
+            for i, (pid, text, drained) in enumerate(self.orbit):
+                angle = math.radians(90 + (i - (n - 1) / 2) * (sweep / (n - 1)) if n > 1 else 90)
+                t = min(1, max(0, (self._now - self._hover_since - i * .06) / .25))
+                if t <= 0:
+                    continue
+                scale = ease_out_back(t)
+                x, y = cx + radius * math.cos(angle), cy - radius * math.sin(angle)
+                x = min(max(14, x), self.width() - 14)  # 图标不飞出窗口左右边缘
+                pix = self._icon(pid, gray=drained)
+                if not pix.isNull():
+                    size = (22 if self._desk else 26) * scale
+                    p.save()
+                    p.setOpacity(min(1, t * 1.4) * (.55 if drained else 1))
+                    p.drawPixmap(QRectF(x - size / 2, y - size / 2, size, size).toRect(), pix)
+                    p.restore()
+                halo.append((x, y - (14 if self._desk else 16), text, t, drained))
         if self._desk and not desk_baked:
             self._draw_laptop(p, self._typing())
         if self._now < self._train_until:
@@ -1169,7 +1235,7 @@ class PetWidget(QWidget):
                     s = size * max(.01, pop)
                     p.drawPixmap(QRectF(-s / 2, -s / 2, s, s).toRect(), pix)
                     p.restore()
-        bubble = self._bubble_text()
+        bubble = "" if halo_active else self._bubble_text()
         if bubble:
             # pop 对话气泡: 悬在当前角色头顶(随身高/帧形变自适应), 斜尾巴指向头顶;
             # 框体与尾巴做路径并集, 交界没有描边隔断;
@@ -1206,6 +1272,27 @@ class PetWidget(QWidget):
             p.setFont(font)
             p.drawText(QRectF(bx + 2, by, bw - 4, 28), Qt.AlignCenter, bubble)
             p.restore()
+        placed = []  # 已放置的胶囊, 碰撞就往上一排让位, 互不重叠
+        for x, y, text, t, drained in halo:
+            if t < .4:
+                continue
+            w = max(30, 7 * len(text) + 10) if self._desk else max(34, 8 * len(text) + 12)
+            x = min(max(w / 2 + 2, x), self.width() - w / 2 - 2)  # 胶囊整体收进窗口
+            box = QRectF(x - w / 2, y - 14, w, 14)
+            for _ in range(3):
+                if not any(box.adjusted(-3, 0, 3, 0).intersects(o) for o in placed):
+                    break
+                box.translate(0, -15)
+            if box.top() < 2:
+                box.moveTop(2)
+            placed.append(box)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(110, 118, 116, int(220 * min(1, t))) if drained
+                       else QColor(20, 26, 26, int(220 * min(1, t))))
+            p.drawRoundedRect(box, 7, 7)
+            p.setPen(QColor("#dfe5e2") if drained else QColor("#f4f6f2"))
+            p.setFont(QFont("Microsoft YaHei UI", 7, QFont.Bold))
+            p.drawText(box, Qt.AlignCenter, text)
 
     def _draw_pens(self, p, rect):
         """训练模式: 八字双铅笔悬在脚前, 跟敲击交替敲下, 长按伏地, 上方倒计时。"""

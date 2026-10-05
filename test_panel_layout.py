@@ -165,14 +165,16 @@ class CleanPanelTests(unittest.TestCase):
         self.assertLess(board.cards[0].y(),board.cards[1].y())
         board.close()
 
-    def test_halo_includes_drained_and_missing_as_gray(self):
+    def test_halo_removed_and_status_still_computes(self):
+        """光环(悬停图标竖条)已按需求移除; 状态计算不受影响。"""
         pet=PetWidget()
+        self.addCleanup(pet.close)
         cfg=[{"id":"a","name":"A"},{"id":"b","name":"B"},{"id":"c","name":"C"}]
         pet.set_status({"a":{"ok":True,"remaining":0,"total":100},
                         "b":{"ok":False}}, cfg)
-        self.assertEqual([e[0] for e in pet.orbit],["a","b","c"])
-        self.assertTrue(all(e[2] for e in pet.orbit))
-        pet.close()
+        self.assertEqual(pet.pct, 0)
+        self.assertTrue(pet.alert)
+        self.assertFalse(hasattr(pet, "orbit"))
 
     def test_provider_icon_click_emits_activate(self):
         from PySide6.QtCore import Qt, QPoint
